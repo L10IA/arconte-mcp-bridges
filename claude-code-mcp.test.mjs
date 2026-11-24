@@ -1,4 +1,4 @@
-import { testPolicy } from './test-policy.mjs';
+import { testPolicy, testEnv } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -8,8 +8,6 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  symlinkSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,7 +30,7 @@ function makeWorkspace(t) {
     rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const cwd = join(base, 'repo');
-  const claudeHome = join(base, 'claude-home');
+  const claudeHome = join(base, '.claude');
   const outside = join(base, 'outside');
   mkdirSync(join(cwd, '.git'), { recursive: true });
   mkdirSync(join(claudeHome, 'projects'), { recursive: true });
@@ -47,7 +45,7 @@ test('claude-code-local MCP: initialize, tools/list, status, ask, review, list_s
   const server = createClaudeCodeMcpServer({
     policy: testPolicy(w.cwd),
     executable: 'C:\\mock\\claude.exe',
-    claudeHome: w.claudeHome,
+    homeDir: w.base,
     env: {
       PATH: 'C:\\Windows\\System32',
       ANTHROPIC_API_KEY: 'dummy-billed-anthropic-key',
@@ -209,12 +207,8 @@ test('claude-code-local MCP responde por stdio JSON-RPC real como proceso hijo',
   const serverPath = join(repoRoot, 'claude-code-mcp-server.mjs');
 
   const child = spawn(process.execPath, [serverPath, '--allow-project-data', '--project-root', w.cwd], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      USERPROFILE: w.base,
-      HOME: w.base,
-    },
+    cwd: w.base,
+    env: testEnv(w.base),
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -314,11 +308,10 @@ test('Claude limita herramientas y aísla ajustes del proyecto y MCP en lectura 
     assert.equal(execution[execution.indexOf('--setting-sources') + 1], 'user');
     assert.ok(execution.includes('--strict-mcp-config'));
     assert.ok(!execution.includes('--bare'));
-    if (mode === 'read-only') {
-      assert.equal(execution[execution.indexOf('--allowedTools') + 1], 'Read,Grep,Glob');
-      assert.equal(execution[execution.indexOf('--tools') + 1], 'Read,Grep,Glob');
-      assert.ok(!execution.some(arg => arg.includes('Bash')));
-    }
+    assert.equal(execution[execution.indexOf('--allowedTools') + 1], 'Read,Grep,Glob');
+    assert.equal(execution[execution.indexOf('--tools') + 1], 'Read,Grep,Glob');
+    assert.ok(!execution.some(arg => arg.includes('Bash')));
+    assert.equal(execution[execution.indexOf('--permission-mode') + 1], mode === 'plan' ? 'plan' : 'dontAsk');
     const auth = runs.at(-2);
     assert.equal(auth.cwd, w.cwd);
     assert.ok(auth.args.includes('--strict-mcp-config'));

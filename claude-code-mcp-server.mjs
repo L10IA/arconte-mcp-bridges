@@ -89,10 +89,10 @@ export function buildClaudeCliArgs({
   if (sessionId) args.push('--resume', sessionId);
   if (maxTurns !== undefined) args.push('--max-turns', String(maxTurns));
 
-  if (mode === 'read-only') {
+  if (mode === 'read-only' || mode === 'plan') {
     args.push(
       '--permission-mode',
-      'dontAsk',
+      mode === 'plan' ? 'plan' : 'dontAsk',
       '--allowedTools',
       READ_ONLY_ALLOWED_TOOLS,
       '--tools',
@@ -100,8 +100,6 @@ export function buildClaudeCliArgs({
       '--disallowedTools',
       READ_ONLY_DISALLOWED_TOOLS,
     );
-  } else if (mode === 'plan') {
-    args.push('--permission-mode', 'plan');
   } else if (mode === 'edit') {
     args.push('--permission-mode', 'acceptEdits');
   } else {
@@ -290,11 +288,11 @@ export function createClaudeCodeMcpServer(options = {}) {
   const resolveBinary =
     options.resolveExecutable ??
     (() =>
-      resolveExecutable(
+      policy.installedExecutable(resolveExecutable(
         'CLAUDE_BIN',
         [join(homeDirectory, '.local', 'bin', 'claude.exe')],
         ['claude.exe', 'claude'],
-      ));
+      )));
   const runProcess =
     options.runProcess ??
     (params => defaultRunProcess({ ...params, spawnProcess: options.spawnProcess, terminate: options.terminateProcessTree }));
@@ -309,7 +307,7 @@ export function createClaudeCodeMcpServer(options = {}) {
     const authRes = await runProcess({
       executable,
       args: [...isolatedSettingsArgs(mode), 'auth', 'status', '--json'],
-      cwd,
+      cwd: policy.authorize(cwd),
       env,
       timeoutMs: STATUS_TIMEOUT_MS,
     });
@@ -360,16 +358,17 @@ export function createClaudeCodeMcpServer(options = {}) {
 
     const env = sanitizedEnv();
     const run = async lock => {
+      policy.prepareSession('claude-code');
       const auth = await readAuth(executable, plainCwd, mode, env);
       if (auth.loggedIn !== true || auth.authMethod !== 'claude.ai') {
         throw new BridgeError('Se requiere una sesión de suscripción claude.ai verificada antes de ejecutar Claude Code.');
       }
-      const outcome = await runProcess({ executable, args, cwd: plainCwd, env, stdinText: prompt, timeoutMs, onSpawn: lock?.registerChild });
+      const outcome = await runProcess({ executable, args, cwd: policy.authorize(plainCwd), env, stdinText: prompt, timeoutMs, onSpawn: lock?.registerChild });
       if (outcome.timedOut && outcome.treeTerminated !== true) lock?.markTreeUnterminated?.();
       return outcome;
     };
     const outcome = mode === 'edit'
-      ? await withCwdWriteLock(plainCwd, 'claude-code-local', run, options.lockDir)
+      ? await withCwdWriteLock(policy.root, 'claude-code-local', run, options.lockDir ?? policy.lockDirectory())
       : await run();
 
     const structured = parseClaudeJsonResult(outcome.stdout, outcome.stderr, outcome.exitCode, {

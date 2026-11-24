@@ -33,9 +33,9 @@ function sandbox(t) {
   const root = mkdtempSync(join(tmpdir(), 'arconte-agy-mcp-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dirs = {};
-  for (const name of ['cwd', 'buzon', 'conversaciones', 'cerrojos']) {
+  for (const name of ['cwd', 'buzon', 'cerrojos']) {
     dirs[name] = join(root, name);
-    mkdirSync(dirs[name]);
+    mkdirSync(dirs[name], { mode: 0o700 });
   }
   mkdirSync(join(dirs.cwd, '.git'));
   dirs.mailBase = dirs.buzon;
@@ -52,9 +52,6 @@ function makeServer(dirs, runProcess, extra = {}) {
     policy: dirs.policy,
     executable: 'agy.exe',
     env: { GEMINI_API_KEY: 'x', GOOGLE_API_KEY: 'y', GOOGLE_GENAI_USE_VERTEXAI: '1', PATH: 'p', LOCALAPPDATA: dirs.cwd },
-    buzonDir: dirs.buzon,
-    conversationsDir: dirs.conversaciones,
-    probeCwd: dirs.cwd,
     lockDir: dirs.cerrojos,
     now: () => new Date('2026-11-24T00:05:09Z'),
     runProcess,
@@ -248,14 +245,17 @@ test('Antigravity conserva el cerrojo de accept-edits y bloquea el reintento tra
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), record);
 });
 
-test('antigravity-local lista solo conversaciones regulares de la CLI', async t => {
+test('Antigravity lista solo sesiones completadas por el puente para la raíz', async t => {
   const dirs = sandbox(t);
-  writeFileSync(join(dirs.conversaciones, '11111111-2222-4333-8444-555555555555.db'), 'a');
-  writeFileSync(join(dirs.conversaciones, 'no-es-uuid.db'), 'b');
-  writeFileSync(join(dirs.conversaciones, '11111111-2222-4333-8444-555555555555.db-wal'), 'c');
-  const server = makeServer(dirs, async () => { throw new Error('no debe ejecutar la CLI'); });
+  const id = '11111111-2222-4333-8444-555555555555';
+  let calls = 0;
+  const server = makeServer(dirs, async () => { calls++; return { stdout: OK_JSON, exitCode: 0 }; });
+  assert.deepEqual((await call(server, 'antigravity_list_conversations')).result.structuredContent.conversaciones, []);
+  assert.equal(calls, 0);
+  assert.ok((await call(server, 'antigravity_ask', { prompt: 'Ejemplo' })).result.structuredContent.ok);
   const res = await call(server, 'antigravity_list_conversations', { limit: 5 });
-  assert.deepEqual(res.result.structuredContent.conversaciones, []);
+  assert.deepEqual(res.result.structuredContent.conversaciones.map(entry => entry.conversationId), [id]);
+  assert.equal(calls, 1);
   const invalid = await call(server, 'antigravity_list_conversations', { limit: 0 });
   assert.equal(invalid.result.isError, true);
 });

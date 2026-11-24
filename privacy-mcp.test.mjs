@@ -1,7 +1,7 @@
-import { testPolicy } from './test-policy.mjs';
+import { testPolicy, testEnv } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,30 +34,30 @@ test('una señal al hijo en POSIX no confirma la terminación de todos los desce
   assert.ok(signalled);
 });
 
-test('cada punto de entrada ofrece solo una comprobación local por defecto y ante opciones desconocidas', () => {
+test('cada punto de entrada ofrece solo una comprobación local por defecto', t => {
+  const base = mkdtempSync(join(tmpdir(), 'arconte-ping-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
   for (const provider of ['codex', 'claude-code', 'antigravity']) {
     const script = fileURLToPath(new URL(`./${provider}-mcp-server.mjs`, import.meta.url));
-    for (const flags of [[]]) {
-      const inputs = [
-        request(1, 'initialize'), request(2, 'tools/list'),
-        request(3, 'tools/call', { name: 'bridge_ping', arguments: {} }),
-        request(4, 'tools/call', { name: 'bridge_ping', arguments: { note: 'texto de prueba reservado' } }),
-        request(5, 'tools/call', { name: 'buzon_list', arguments: {} }),
-        request(6, 'tools/call', { name: 'antigravity_ask', arguments: { prompt: 'texto de prueba reservado' } }),
-      ];
-      const proc = spawnSync(process.execPath, [script, ...flags], {
-        input: inputs.map(row => JSON.stringify(row)).join('\n') + '\n', encoding: 'utf8',
-        env: buildCliEnv(), windowsHide: true, timeout: 8000,
-      });
-      assert.equal(proc.status, 0);
-      assert.equal(proc.stderr, '');
-      assert.ok(!proc.stdout.includes('texto de prueba reservado'));
-      const [, list, ping, extra, mailbox, ask] = proc.stdout.trim().split('\n').map(line => JSON.parse(line));
-      assert.deepEqual(list.result.tools.map(t => t.name), ['bridge_ping']);
-      assert.deepEqual(ping.result.structuredContent, { ok: true, mode: 'connection-only' });
-      assert.equal(extra.result.isError, true);
-      assert.ok(mailbox.error && ask.error);
-    }
+    const inputs = [
+      request(1, 'initialize'), request(2, 'tools/list'),
+      request(3, 'tools/call', { name: 'bridge_ping', arguments: {} }),
+      request(4, 'tools/call', { name: 'bridge_ping', arguments: { note: 'texto de prueba reservado' } }),
+      request(5, 'tools/call', { name: 'buzon_list', arguments: {} }),
+      request(6, 'tools/call', { name: 'antigravity_ask', arguments: { prompt: 'texto de prueba reservado' } }),
+    ];
+    const proc = spawnSync(process.execPath, [script], {
+      input: inputs.map(row => JSON.stringify(row)).join('\n') + '\n', encoding: 'utf8',
+      env: testEnv(base), cwd: base, windowsHide: true, timeout: 8000,
+    });
+    assert.equal(proc.status, 0);
+    assert.equal(proc.stderr, '');
+    assert.ok(!proc.stdout.includes('texto de prueba reservado'));
+    const [, list, ping, extra, mailbox, ask] = proc.stdout.trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(list.result.tools.map(t => t.name), ['bridge_ping']);
+    assert.deepEqual(ping.result.structuredContent, { ok: true, mode: 'connection-only' });
+    assert.equal(extra.result.isError, true);
+    assert.ok(mailbox.error && ask.error);
   }
 });
 
@@ -68,8 +68,10 @@ test('el entorno de la CLI excluye valores desconocidos, credenciales y opciones
 });
 
 test('los tres puentes bloquean contenido privado antes de iniciar procesos o escribir al buzón', async t => {
-  const cwd = mkdtempSync(join(tmpdir(), 'mcp-privacy-'));
-  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const base = mkdtempSync(join(tmpdir(), 'mcp-privacy-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const cwd = join(base, 'proyecto');
+  mkdirSync(cwd);
   let calls = 0;
   const processStub = () => { calls++; throw new Error('diagnóstico ficticio privado'); };
   const agy = createAntigravityMcpServer({ policy: testPolicy(cwd, { mailboxAs: 'codex' }), executable: 'agy.exe', runProcess: processStub });
@@ -92,8 +94,10 @@ test('los tres puentes bloquean contenido privado antes de iniciar procesos o es
 });
 
 test('los diagnósticos y las respuestas sensibles no llegan al cliente', async t => {
-  const cwd = mkdtempSync(join(tmpdir(), 'mcp-privacy-'));
-  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const base = mkdtempSync(join(tmpdir(), 'mcp-privacy-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const cwd = join(base, 'proyecto');
+  mkdirSync(cwd);
   const diagnostic = 'nota interna inventada del proveedor';
   const agy = createAntigravityMcpServer({ policy: testPolicy(cwd), executable: 'agy.exe', runProcess: async () =>
     ({ stdout: JSON.stringify({ response: 'privado@example.invalid' }), stderr: diagnostic, exitCode: 0 }) });

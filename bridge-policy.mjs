@@ -23,7 +23,7 @@ function inside(root, candidate) {
 }
 
 // Se comprueba cada componente antes de crear el siguiente, también en el almacén privado.
-function directory(path, create) {
+function directory(path, create, privateRoot) {
   const parts = path.slice(parse(path).root.length).split(sep).filter(Boolean);
   let cursor = parse(path).root;
   for (const part of parts) {
@@ -35,6 +35,9 @@ function directory(path, create) {
       entry = lstatSync(cursor);
     }
     if (entry.isSymbolicLink() || !entry.isDirectory()) throw new BridgeError('El almacén local requiere directorios reales.');
+    if (process.getuid && inside(privateRoot, cursor) && (entry.uid !== process.getuid() || (entry.mode & 0o077))) {
+      throw new BridgeError('El almacén local requiere permisos exclusivos del usuario.');
+    }
   }
   return cursor;
 }
@@ -48,9 +51,9 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
   const projectKey = createHash('sha256').update([normalized, rootIdentity.dev, rootIdentity.ino].join('|')).digest('hex');
   const base = localPath(stateDir ?? join(process.env.LOCALAPPDATA || join(homedir(), '.local', 'state'), 'ARCONTE', 'mcp-state'));
   const mail = localPath(mailboxDir ?? process.env.ARCONTE_BUZON_DIR ?? join(base, 'mailboxes'));
-  for (const storage of [join(base, 'sessions', projectKey), join(base, 'owners'), join(mail, projectKey)]) {
+  for (const storage of [base, mail]) {
     if (inside(project, storage) || inside(storage, project)) throw new BridgeError('El estado privado debe estar fuera del proyecto.');
-    directory(storage, false);
+    directory(storage, false, storage);
   }
   function authorize(cwd = project) {
     const activeRoot = canonical(project);
@@ -68,14 +71,46 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     return path;
   }
   function sessionDirectory(provider, create) {
-    return directory(join(base, 'sessions', projectKey, provider), create);
+    return directory(join(base, 'sessions', projectKey, provider), create, base);
+  }
+  function prepareSession(provider) {
+    // El registro necesita creación exclusiva en ambos directorios y enlaces duros entre archivos del mismo directorio.
+    try {
+      const sessions = sessionDirectory(provider, true);
+      const owners = directory(join(base, 'owners', provider), true, base);
+      const probe = '.' + randomUUID();
+      const sessionTest = join(sessions, probe);
+      closeSync(openSync(sessionTest, 'wx', 0o600));
+      unlinkSync(sessionTest);
+      const ownerTest = join(owners, probe);
+      closeSync(openSync(ownerTest, 'wx', 0o600));
+      try {
+        const linked = ownerTest + '.link';
+        linkSync(ownerTest, linked);
+        unlinkSync(linked);
+      } finally { unlinkSync(ownerTest); }
+    } catch {
+      throw new BridgeError('El registro local de sesiones no admite escritura segura. Comprueba su espacio y permisos antes de delegar.');
+    }
+  }
+  function installedExecutable(path) {
+    if (!path) return null;
+    if (!isAbsolute(path) || inside(project, resolve(path)) || inside(project, realpathSync.native(path))) {
+      throw new BridgeError('La CLI debe instalarse fuera del proyecto autorizado.');
+    }
+    return path;
+  }
+  function outputFile() {
+    const file = join(directory(join(base, 'output'), true, base), randomUUID() + '.txt');
+    closeSync(openSync(file, 'wx', 0o600));
+    return file;
   }
   function marker(dir, id) {
     const stat = dir && uuid.test(id) ? lstatSync(join(dir, id.toLowerCase()), { throwIfNoEntry: false }) : null;
     return stat?.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size === 0 ? stat : null;
   }
   function owned(provider, id) {
-    const owners = directory(join(base, 'owners', provider), false);
+    const owners = directory(join(base, 'owners', provider), false, base);
     if (!owners) return false;
     const path = join(owners, id.toLowerCase());
     const entry = lstatSync(path, { throwIfNoEntry: false });
@@ -89,7 +124,7 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
   }
   function remember(provider, id) {
     if (typeof id !== 'string' || !uuid.test(id)) throw new BridgeError('La CLI no devolvió un identificador de sesión válido.');
-    const owners = directory(join(base, 'owners', provider), true);
+    const owners = directory(join(base, 'owners', provider), true, base);
     const target = join(owners, id.toLowerCase());
     if (!owned(provider, id)) {
       const pending = join(owners, '.' + randomUUID());
@@ -113,8 +148,9 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
     return { entries: entries.slice(0, limit), total: entries.length };
   }
-  return Object.freeze({ root: project, access, mailboxAs, authorize, requireSession, remember, sessions,
-    mailboxRoot: create => directory(join(mail, projectKey), create) });
+  return Object.freeze({ root: project, access, mailboxAs, authorize, requireSession, prepareSession, remember, sessions,
+    installedExecutable, outputFile, lockDirectory: () => directory(join(base, 'locks'), true, base),
+    mailboxRoot: create => directory(join(mail, projectKey), create, mail) });
 }
 
 export function startBridge(name, factory, flags = process.argv.slice(2)) {
@@ -154,7 +190,14 @@ export function projectServer(policy, { name, version, instructions, tools }) {
       if (Object.hasOwn(input, sessionField)) policy.requireSession(provider, input[sessionField]);
       const outcome = await tool.handler(input);
       const id = outcome?.structuredContent?.[sessionField];
-      if (outcome?.structuredContent?.ok && id && !input.ephemeral) policy.remember(provider, id);
+      if (outcome?.structuredContent?.ok && id && !input.ephemeral) {
+        try { policy.remember(provider, id); }
+        catch {
+          // El proveedor ya ejecutó la solicitud. Su contenido podría pertenecer a otra raíz si hubo colisión.
+          const warning = 'La CLI completó la operación. El puente omitió la respuesta y la sesión al no poder verificar su procedencia. Revisa los cambios antes de repetirla.';
+          return { text: warning, structuredContent: { ok: true, [sessionField]: null, sessionRecorded: false, warning } };
+        }
+      }
       return outcome;
     } };
   }) });

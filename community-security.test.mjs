@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -10,7 +10,8 @@ import { createProjectPolicy } from './bridge-policy.mjs';
 import { createAntigravityMcpServer } from './antigravity-mcp-server.mjs';
 import { createClaudeCodeMcpServer } from './claude-code-mcp-server.mjs';
 import { createCodexMcpServer } from './codex-mcp-server.mjs';
-import { buildCliEnv, createMcpStdioServer, MAX_IN_FLIGHT, MAX_MESSAGE_BYTES } from './mcp-stdio.mjs';
+import { testEnv } from './test-policy.mjs';
+import { createMcpStdioServer, MAX_IN_FLIGHT, MAX_MESSAGE_BYTES } from './mcp-stdio.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const idA = '11111111-0000-4000-8000-000000000001';
@@ -97,7 +98,11 @@ test('la procedencia persiste por raíz y proveedor y nunca se deduce de un UUID
   assert.deepEqual((await call(b.agy, 'antigravity_list_conversations', {})).result.structuredContent.conversaciones, []);
   denied(await call(again.agy, 'antigravity_ask', { cwd: w.sibling, conversationId: idA, prompt: 'fuera' }));
   const collision = doubles(w.policy({ root: w.sibling }), idA);
-  denied(await call(collision.agy, 'antigravity_ask', { prompt: 'identificador duplicado devuelto por la CLI' }));
+  const completed = await call(collision.agy, 'antigravity_ask', { prompt: 'identificador duplicado devuelto por la CLI' });
+  assert.equal(completed.result.structuredContent.ok, true);
+  assert.equal(completed.result.structuredContent.sessionRecorded, false);
+  assert.equal(completed.result.structuredContent.conversationId, null);
+  assert.ok(!JSON.stringify(completed).includes(idA));
   assert.deepEqual((await call(collision.agy, 'antigravity_list_conversations', {})).result.structuredContent.conversaciones, []);
 });
 
@@ -180,9 +185,10 @@ test('los ejemplos JSON del README arrancan y las configuraciones antiguas o amb
   const doc = readFileSync(join(here, 'README.md'), 'utf8');
   const blocks = [...doc.matchAll(/\x60{3}json\n([\s\S]*?)\n\x60{3}/g)].map(m => JSON.parse(m[1]));
   assert.equal(blocks.length, 3);
-  const run = (args, input) => spawnSync(process.execPath, args, { cwd: w.base, env: buildCliEnv(), windowsHide: true, encoding: 'utf8', input });
+  const run = (args, input) => spawnSync(process.execPath, args, { cwd: w.base, env: testEnv(w.base), windowsHide: true, encoding: 'utf8', timeout: 8000, input });
   for (const [i, block] of blocks.entries()) {
     for (const conf of Object.values(block.mcpServers)) {
+      assert.equal(conf.command, 'node');
       const args = conf.args.map(s => s.replace('<PUENTES>', here).replace('<PROYECTO>', w.root));
       const proc = run(args, '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
       assert.equal(proc.status, 0, proc.stderr);
@@ -193,12 +199,124 @@ test('los ejemplos JSON del README arrancan y las configuraciones antiguas o amb
       if (i === 2) assert.ok(args.includes('read-write'));
     }
   }
-  const script = join(here, 'antigravity-mcp-server.mjs');
-  for (const flags of [['--allow-project-data'], ['--unknown'], ['--project-root', w.root], ['--allow-project-data', '--project-root', w.root, '--access', 'otro'],
-    ['--allow-project-data', '--project-root', w.root, '--access', 'read-only', '--access', 'read-write']]) {
-    const result = run([script, ...flags], '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
-    assert.equal(result.status, 2);
-    assert.equal(result.stdout, '');
-    assert.ok(!result.stderr.includes(w.root));
+  const valid = ['--allow-project-data', '--project-root', w.root];
+  for (const provider of ['antigravity', 'claude-code', 'codex']) {
+    const script = join(here, provider + '-mcp-server.mjs');
+    const invalid = [['--allow-project-data'], ['--unknown'], ['--project-root', w.root], [...valid, '--access', 'otro'],
+      [...valid, '--access', 'read-only', '--access', 'read-write'], [...valid, '--mailbox-as', 'ajeno']];
+    if (provider !== 'antigravity') invalid.push([...valid, '--mailbox-as', 'codex']);
+    for (const flags of invalid) {
+      const result = run([script, ...flags], '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+      assert.equal(result.status, 2);
+      assert.equal(result.stdout, '');
+      assert.ok(!result.stderr.includes(w.root));
+    }
   }
+});
+
+test('un cerrojo de proyecto cubre subdirectorios con y sin repositorios anidados', async t => {
+  const w = workspace(t);
+  const policy = w.policy({ access: 'read-write' }), other = doubles(policy);
+  let entered, finish;
+  const active = new Promise(r => { entered = r; });
+  const gate = new Promise(r => { finish = r; });
+  const agy = createAntigravityMcpServer({ policy, executable: 'agy.exe', runProcess: async () => {
+    entered(); await gate; return { exitCode: 0, stdout: JSON.stringify({ status: 'SUCCESS', response: 'fin', conversation_id: idA }) };
+  } });
+  const writing = call(agy, 'antigravity_ask', { cwd: w.root, prompt: 'Editar', mode: 'accept-edits' });
+  try {
+    await active;
+    for (const nested of [false, true]) {
+      if (nested) mkdirSync(join(w.child, '.git'));
+      denied(await call(other.codex, 'codex_ask', { cwd: w.child, prompt: 'Editar', sandbox: 'workspace-write' }));
+      denied(await call(other.claude, 'claude_ask', { cwd: w.child, prompt: 'Editar', mode: 'edit' }));
+    }
+    assert.equal(other.calls.length, 0);
+  } finally { finish(); await writing; }
+  assert.ok((await call(other.codex, 'codex_ask', { cwd: w.child, prompt: 'Editar', sandbox: 'workspace-write' })).result.structuredContent.ok);
+});
+
+test('la delegación verifica el almacén antes de la CLI y distingue un fallo de registro posterior al turno', async t => {
+  const w = workspace(t), h = doubles(w.policy());
+  writeFileSync(w.stateDir, 'archivo sintético');
+  for (const [server, name] of [[h.agy, 'antigravity_ask'], [h.claude, 'claude_ask'], [h.codex, 'codex_ask']]) {
+    denied(await call(server, name, { prompt: 'Ejemplo' }));
+  }
+  assert.equal(h.calls.length, 0);
+  rmSync(w.stateDir);
+  const server = createAntigravityMcpServer({ policy: w.policy(), executable: 'agy.exe', runProcess: async () => {
+    const owners = join(w.stateDir, 'owners');
+    renameSync(owners, owners + '-anterior');
+    writeFileSync(owners, 'prueba');
+    return { exitCode: 0, stdout: JSON.stringify({ status: 'SUCCESS', response: 'respuesta reservada de prueba', conversation_id: idB }) };
+  } });
+  const done = await call(server, 'antigravity_ask', { prompt: 'Ejemplo' });
+  assert.equal(done.result.structuredContent.ok, true);
+  assert.equal(done.result.structuredContent.conversationId, null);
+  assert.equal(done.result.structuredContent.sessionRecorded, false);
+  assert.match(done.result.content[0].text, /completó la operación/);
+  for (const privateValue of [idB, w.stateDir, 'respuesta reservada de prueba']) assert.ok(!JSON.stringify(done).includes(privateValue));
+});
+
+test('Codex y Claude revalidan la identidad de la raíz después de la sonda', async t => {
+  for (const provider of ['codex', 'claude']) {
+    const w = workspace(t), policy = w.policy();
+    const replace = () => { renameSync(w.root, w.root + '-anterior'); mkdirSync(w.root); };
+    let runs = 0;
+    const server = provider === 'codex'
+      ? createCodexMcpServer({ policy, executable: 'codex.exe', probeCodex: async () => { replace(); return { account: { type: 'chatgpt' } }; },
+          runCodexExec: async () => { runs++; } })
+      : createClaudeCodeMcpServer({ policy, executable: 'claude.exe', runProcess: async ({ args }) => {
+          if (args.includes('auth')) { replace(); return { exitCode: 0, stdout: '{"loggedIn":true,"authMethod":"claude.ai"}' }; }
+          runs++;
+        } });
+    denied(await call(server, provider + '_ask', { prompt: 'Ejemplo' }));
+    assert.equal(runs, 0);
+  }
+});
+
+test('la CLI instalada y la salida de Codex permanecen fuera del proyecto', async t => {
+  const w = workspace(t), p = w.policy(), fake = join(w.child, 'codex.exe');
+  writeFileSync(fake, 'doble de prueba');
+  let probes = 0;
+  const rejected = createCodexMcpServer({ policy: p, baseEnv: { CODEX_BIN: fake }, homeDir: w.base,
+    probeCodex: async () => { probes++; } });
+  denied(await call(rejected, 'codex_ask', { prompt: 'Prueba' }));
+  assert.equal(probes, 0);
+  const h = doubles(p);
+  await call(h.codex, 'codex_ask', { prompt: 'Consulta' });
+  const file = h.calls.at(-1).tmpOutFile;
+  assert.equal(dirname(file), join(w.stateDir, 'output'));
+  assert.deepEqual(readdirSync(dirname(file)), []);
+});
+
+test('el puente rechaza enlaces simbólicos de directorio antes de la CLI', async t => {
+  const w = workspace(t), h = doubles(w.policy()), link = join(w.root, 'enlace-simbolico');
+  try { symlinkSync(w.sibling, link, 'dir'); } catch (err) {
+    if (process.platform === 'win32' && err.code === 'EPERM') return t.skip('Windows exige privilegio para crear este enlace simbólico.');
+    throw err;
+  }
+  denied(await call(h.agy, 'antigravity_ask', { cwd: link, prompt: 'Prueba' }));
+  assert.equal(h.calls.length, 0);
+});
+
+test('las peticiones saturadas a Antigravity no ejecutan el proveedor y luego pueden reintentarse', { timeout: 5000 }, async t => {
+  const w = workspace(t);
+  let calls = 0, release;
+  const gate = new Promise(r => { release = r; });
+  const server = createAntigravityMcpServer({ policy: w.policy(), executable: 'agy.exe', runProcess: async () => {
+    calls++;
+    await gate;
+    return { exitCode: 0, stdout: JSON.stringify({ status: 'SUCCESS', response: 'Listo', conversation_id: idA }) };
+  } });
+  const io = transport(t, server);
+  for (let i = 0; i <= MAX_IN_FLIGHT; i++) io.send(rpc(i, 'antigravity_ask', { prompt: 'Ejemplo' }));
+  try {
+    assert.equal((await io.take()).error.code, -32002);
+    assert.equal(calls, MAX_IN_FLIGHT);
+  } finally { release(); }
+  for (let i = 0; i < MAX_IN_FLIGHT; i++) assert.ok((await io.take()).result.structuredContent.ok);
+  io.send(rpc(20, 'antigravity_ask', { prompt: 'Reintento' }));
+  assert.ok((await io.take()).result.structuredContent.ok);
+  assert.equal(calls, MAX_IN_FLIGHT + 1);
 });

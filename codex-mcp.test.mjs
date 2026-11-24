@@ -1,4 +1,4 @@
-import { testPolicy } from './test-policy.mjs';
+import { testPolicy, testEnv } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
@@ -42,7 +42,6 @@ test('codex-local MCP: initialize, ping, tools/list, codex_status y codex_models
     const server = createCodexMcpServer({
       policy: testPolicy(workDir),
       executable: process.execPath,
-      defaultCwd: workDir,
       baseEnv: {
         PATH: process.env.PATH ?? '',
         OPENAI_API_KEY: 'sk-should-be-stripped',
@@ -151,7 +150,6 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
     const server = createCodexMcpServer({
       policy: testPolicy(workDir),
       executable: 'C:\\Stub\\codex.exe',
-      defaultCwd: workDir,
       baseEnv: {
         PATH: process.env.PATH ?? '',
         OPENAI_API_KEY: 'sk-test-must-strip',
@@ -605,11 +603,11 @@ test('ambos puentes comparten cerrojos, permiten lectura y recuperan un propieta
 test('Codex conserva el cerrojo tras un timeout sin terminación confirmada aunque desaparezcan ambos PID', async t => {
   const { cwd, lockDir } = makeLockWorkspace(t);
   let treeTerminated = true;
-  let writes = 0;
+  let writes = 0, probes = 0;
   const server = createCodexMcpServer({
     policy: testPolicy(cwd),
     executable: 'codex.exe', lockDir,
-    probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
+    probeCodex: async () => { probes++; return { account: { type: 'chatgpt' }, modelList: {} }; },
     runCodexExec: async ({ onSpawn }) => {
       writes++;
       onSpawn(process.pid);
@@ -642,6 +640,7 @@ test('Codex conserva el cerrojo tras un timeout sin terminación confirmada aunq
   assert.ok(!retry.result.content[0].text.includes(lockDir), 'el mensaje no debe revelar el directorio privado de cerrojos');
   assert.equal(readFileSync(path, 'utf8'), stale);
   assert.equal(writes, 2);
+  assert.equal(probes, 2);
 });
 
 test('marcar un árbol sin terminación confirmada respeta el token de otro propietario', async t => {
@@ -725,7 +724,7 @@ test('el cerrojo es exclusivo también entre procesos distintos', async t => {
       await new Promise(resolve => { process.stdin.resume(); process.stdin.once('end', resolve); });
     }, process.argv[3]);`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script, moduleUrl, cwd, lockDir], {
-    stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    env: testEnv(dirname(cwd)), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
   });
   t.after(() => { try { child.kill(); } catch { /* ya terminó */ } });
   child.stderr.resume();
@@ -741,10 +740,12 @@ test('el cerrojo es exclusivo también entre procesos distintos', async t => {
   assert.equal((await call(server, 'codex_ask', { cwd, prompt: 'Editar', sandbox: 'workspace-write' })).result.structuredContent.ok, true);
 });
 
-test('Codex arranca como punto de entrada con mayúsculas distintas en Windows', { skip: process.platform !== 'win32' }, async () => {
+test('Codex arranca como punto de entrada con mayúsculas distintas en Windows', { skip: process.platform !== 'win32' }, async t => {
+  const profile = mkdtempSync(join(tmpdir(), 'arconte-ping-'));
+  t.after(() => rmSync(profile, { recursive: true, force: true }));
   const repo = dirname(fileURLToPath(import.meta.url));
   const script = join(repo, 'codex-mcp-server.mjs').replace(/\.mjs$/, '').toUpperCase() + '.mjs';
-  const child = spawn(process.execPath, [script], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(process.execPath, [script], { cwd: profile, env: testEnv(profile), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   let output = '';
   let errors = '';
   child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });

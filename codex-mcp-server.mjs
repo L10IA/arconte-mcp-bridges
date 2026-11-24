@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -195,7 +194,7 @@ function parseCodexJsonl(stdoutText) {
       continue;
     }
     if (!isPlainObject(evt)) continue;
-    if (evt.type === 'thread.started' && typeof evt.thread_id === 'string' && evt.thread_id.trim()) {
+    if (evt.type === 'thread.started' && typeof evt.thread_id === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(evt.thread_id)) {
       sessionId = evt.thread_id.trim();
     } else if (evt.type === 'item.completed' && isPlainObject(evt.item)) {
       if (evt.item.type === 'agent_message' && typeof evt.item.text === 'string' && evt.item.text.trim()) {
@@ -524,14 +523,14 @@ export function createCodexMcpServer(options = {}) {
     const desktopExe = discoverCodexDesktopExecutable(options.homeDir ?? homedir());
     const localAppData = env.LOCALAPPDATA ?? '';
     const candidatePaths = [
-      ...(desktopExe ? [desktopExe] : []),
       ...(localAppData ? [join(localAppData, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe')] : []),
+      ...(desktopExe ? [desktopExe] : []),
     ];
     if (envCodexBin) {
       const verifiedEnv = resolveExecutable('', [envCodexBin], []);
-      if (verifiedEnv) return verifiedEnv;
+      if (verifiedEnv) return policy.installedExecutable(verifiedEnv);
     }
-    return resolveExecutable('', candidatePaths, ['codex.exe', 'codex']);
+    return policy.installedExecutable(resolveExecutable('', candidatePaths, ['codex.exe', 'codex']));
   };
 
   const probeFn = options.probeCodex ?? ((exe, env, cwd) => defaultProbeAppServer(exe, env, cwd, {
@@ -554,7 +553,7 @@ export function createCodexMcpServer(options = {}) {
       };
     }
     try {
-      const probe = await probeFn(executablePath, cleanEnv, cwd);
+      const probe = await probeFn(executablePath, cleanEnv, policy.authorize(cwd));
       const modelResolution =
         Array.isArray(probe?.visibleModels) && probe.effectiveDefaultModel !== undefined
           ? {
@@ -706,54 +705,53 @@ export function createCodexMcpServer(options = {}) {
         }
 
         const cleanEnv = getCleanEnv();
-        const probe = await probeSafe(safeCwd, executablePath, cleanEnv);
-        if (probe.error || probe.account.type !== 'chatgpt') {
-          throw new BridgeError('Se requiere una cuenta ChatGPT verificada antes de ejecutar Codex.');
-        }
-        const selectedModel = explicitModel ?? probe.effectiveDefaultModel;
-
-        const tmpOutFile = join(tmpdir(), `arconte-codex-mcp-${randomUUID()}.txt`);
-
-        const execArgs = sessionId
-          ? [
-              'exec',
-              '-C',
-              safeCwd,
-              '-s',
-              sandbox,
-              ...(sandbox === 'read-only' ? ['--ignore-user-config'] : []),
-              'resume',
-              ...(selectedModel ? ['-m', selectedModel] : []),
-              '--skip-git-repo-check',
-              ...(ephemeral ? ['--ephemeral'] : []),
-              '--json',
-              '-o',
-              tmpOutFile,
-              sessionId,
-              '-',
-            ]
-          : [
-              'exec',
-              '-C',
-              safeCwd,
-              '-s',
-              sandbox,
-              ...(selectedModel ? ['-m', selectedModel] : []),
-              ...(sandbox === 'read-only' ? ['--ignore-user-config'] : []),
-              '--skip-git-repo-check',
-              ...(ephemeral ? ['--ephemeral'] : []),
-              '--json',
-              '-o',
-              tmpOutFile,
-              '-',
-            ];
-
-        try {
-          const run = async lock => {
+        const run = async lock => {
+          if (!ephemeral) policy.prepareSession('codex');
+          const probe = await probeSafe(safeCwd, executablePath, cleanEnv);
+          if (probe.error || probe.account.type !== 'chatgpt') {
+            throw new BridgeError('Se requiere una cuenta ChatGPT verificada antes de ejecutar Codex.');
+          }
+          const selectedModel = explicitModel ?? probe.effectiveDefaultModel;
+          const cwd = policy.authorize(safeCwd);
+          const tmpOutFile = policy.outputFile();
+          const execArgs = sessionId
+            ? [
+                'exec',
+                '-C',
+                cwd,
+                '-s',
+                sandbox,
+                ...(sandbox === 'read-only' ? ['--ignore-user-config'] : []),
+                'resume',
+                ...(selectedModel ? ['-m', selectedModel] : []),
+                '--skip-git-repo-check',
+                ...(ephemeral ? ['--ephemeral'] : []),
+                '--json',
+                '-o',
+                tmpOutFile,
+                sessionId,
+                '-',
+              ]
+            : [
+                'exec',
+                '-C',
+                cwd,
+                '-s',
+                sandbox,
+                ...(selectedModel ? ['-m', selectedModel] : []),
+                ...(sandbox === 'read-only' ? ['--ignore-user-config'] : []),
+                '--skip-git-repo-check',
+                ...(ephemeral ? ['--ephemeral'] : []),
+                '--json',
+                '-o',
+                tmpOutFile,
+                '-',
+              ];
+          try {
             const outcome = await execFn({
               executable: executablePath,
               args: execArgs,
-              cwd: safeCwd,
+              cwd,
               prompt: args.prompt,
               env: cleanEnv,
               timeoutMs,
@@ -761,42 +759,42 @@ export function createCodexMcpServer(options = {}) {
               onSpawn: lock?.registerChild,
             });
             if (outcome.timedOut && outcome.treeTerminated !== true) lock?.markTreeUnterminated?.();
-            return outcome;
-          };
-          const result = sandbox === 'workspace-write'
-            ? await withCwdWriteLock(safeCwd, SERVER_NAME, run, options.lockDir)
-            : await run();
-          const parsed = parseCodexJsonl(result.stdout);
-          const answer = (result.outputFileText ?? '').trim() || parsed.messages.join('\n\n').trim();
-          const ok = result.exitCode === 0 && !result.timedOut && !result.truncated && answer.length > 0;
-          const failureReason = result.timedOut
-            ? `Tiempo de espera agotado (${Math.round(timeoutMs / 1000)}s).${result.treeTerminated !== true ? ' No se pudo confirmar la terminación del árbol de procesos.' : ''}`
-            : result.truncated ? 'La salida de Codex fue truncada por exceder el límite permitido.'
-            : `Codex no completó la consulta (código ${result.exitCode}).`;
+            return { result: outcome, selectedModel };
+          } finally {
+            rmSync(tmpOutFile, { force: true });
+          }
+        };
+        const { result, selectedModel } = sandbox === 'workspace-write'
+          ? await withCwdWriteLock(policy.root, SERVER_NAME, run, options.lockDir ?? policy.lockDirectory())
+          : await run();
+        const parsed = parseCodexJsonl(result.stdout);
+        const answer = (result.outputFileText ?? '').trim() || parsed.messages.join('\n\n').trim();
+        const ok = result.exitCode === 0 && !result.timedOut && !result.truncated && answer.length > 0;
+        const failureReason = result.timedOut
+          ? `Tiempo de espera agotado (${Math.round(timeoutMs / 1000)}s).${result.treeTerminated !== true ? ' No se pudo confirmar la terminación del árbol de procesos.' : ''}`
+          : result.truncated ? 'La salida de Codex fue truncada por exceder el límite permitido.'
+          : `Codex no completó la consulta (código ${result.exitCode}).`;
 
-          const finalSessionId = parsed.sessionId ?? sessionId;
-          const structuredContent = {
-            ok,
-            sessionId: finalSessionId,
-            model: selectedModel,
-            sandbox,
-            answer: ok ? answer : '',
-            exitCode: result.exitCode,
-            durationMs: result.durationMs,
-          };
+        const finalSessionId = ephemeral ? null : parsed.sessionId ?? sessionId;
+        const structuredContent = {
+          ok,
+          sessionId: finalSessionId,
+          model: selectedModel,
+          sandbox,
+          answer: ok ? answer : '',
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        };
 
-          const metaFooter = finalSessionId
-            ? `\n\n[codex-local · model=${selectedModel ?? 'default'} · sessionId=${finalSessionId}]`
-            : `\n\n[codex-local · model=${selectedModel ?? 'default'}]`;
+        const metaFooter = finalSessionId
+          ? `\n\n[codex-local · model=${selectedModel ?? 'default'} · sessionId=${finalSessionId}]`
+          : `\n\n[codex-local · model=${selectedModel ?? 'default'}]`;
 
-          return {
-            text: ok ? `${answer}${metaFooter}` : failureReason,
-            structuredContent,
-            isError: !ok,
-          };
-        } finally {
-          rmSync(tmpOutFile, { force: true });
-        }
+        return {
+          text: ok ? `${answer}${metaFooter}` : failureReason,
+          structuredContent,
+          isError: !ok,
+        };
       },
     },
     {
@@ -822,6 +820,7 @@ export function createCodexMcpServer(options = {}) {
           throw new BridgeError('uncommitted debe ser booleano.');
         }
         const uncommitted = args.uncommitted ?? false;
+        if (uncommitted && args.base) throw new BridgeError('Especifica uncommitted o base, no ambos a la vez.');
         const base =
           args.base !== undefined && args.base !== null && args.base !== ''
             ? assertSafeCliValue(args.base, 'base')
@@ -844,7 +843,8 @@ export function createCodexMcpServer(options = {}) {
         }
         const selectedModel = explicitModel ?? probe.effectiveDefaultModel;
 
-        const tmpOutFile = join(tmpdir(), `arconte-codex-review-${randomUUID()}.txt`);
+        policy.authorize(safeCwd);
+        const tmpOutFile = policy.outputFile();
         const { useGenericExec, args: reviewArgs } = buildReviewArgs({
           cwd: safeCwd,
           model: selectedModel,

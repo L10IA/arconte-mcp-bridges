@@ -210,11 +210,14 @@ function createMailbox(policy) {
       const path = folderPath(folder);
       if (!path) throw new BridgeError('El mensaje no existe en ese buzón.');
       const name = messageName(id);
-      plainFile(join(path, name));
-      const fd = openSync(join(path, name), 'r');
+      const expected = plainFile(join(path, name));
+      const fd = openSync(join(path, name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       try {
         // El tamaño se comprueba sobre el archivo ya abierto y la lectura queda acotada aunque crezca después.
-        if (!fstatSync(fd).isFile()) throw new BridgeError('El mensaje no es un archivo regular.');
+        const opened = fstatSync(fd);
+        if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+          throw new BridgeError('El mensaje cambió durante la lectura.');
+        }
         const buffer = Buffer.alloc(MAX_READ_BYTES + 1);
         let bytes = 0;
         for (;;) {
@@ -311,7 +314,7 @@ export function createAntigravityMcpServer(options = {}) {
   const now = options.now ?? (() => new Date());
   const resolveBinary =
     options.resolveExecutable ??
-    (() => resolveExecutable('AGY_BIN', [join(localAppData, 'agy', 'bin', 'agy.exe')], ['agy.exe', 'agy']));
+    (() => policy.installedExecutable(resolveExecutable('AGY_BIN', [join(localAppData, 'agy', 'bin', 'agy.exe')], ['agy.exe', 'agy'])));
   const runProcess =
     options.runProcess ??
     (params => defaultRunProcess({ ...params, spawnProcess: options.spawnProcess, terminate: options.terminateProcessTree }));
@@ -327,7 +330,7 @@ export function createAntigravityMcpServer(options = {}) {
     return executable;
   };
 
-  async function executePrompt({ cwd, prompt, model, conversationId, mode = 'plan', timeoutSec }) {
+  async function executePrompt({ cwd, prompt, model, conversationId, mode = 'plan', timeoutSec, recordSession = true }) {
     const plainCwd = assertPlainCwd(cwd);
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.includes('\0')) {
       throw new BridgeError('El parámetro prompt es obligatorio y no puede contener caracteres nulos.');
@@ -349,12 +352,13 @@ export function createAntigravityMcpServer(options = {}) {
     // El CLI aplica su propio límite; el del puente añade margen para terminar el árbol si no responde.
     const timeoutMs = seconds * 1000 + 15_000;
     const run = async lock => {
-      const outcome = await runProcess({ executable, args, cwd: plainCwd, env, timeoutMs, onSpawn: lock?.registerChild });
+      if (recordSession) policy.prepareSession('antigravity');
+      const outcome = await runProcess({ executable, args, cwd: policy.authorize(plainCwd), env, timeoutMs, onSpawn: lock?.registerChild });
       if (outcome.timedOut && outcome.treeTerminated !== true) lock?.markTreeUnterminated?.();
       return outcome;
     };
     const outcome = mode === 'accept-edits'
-      ? await withCwdWriteLock(plainCwd, 'antigravity-local', run, options.lockDir)
+      ? await withCwdWriteLock(policy.root, 'antigravity-local', run, options.lockDir ?? policy.lockDirectory())
       : await run();
 
     const structured = parseAgyJsonResult(outcome.stdout, outcome.stderr, outcome.exitCode, {
@@ -401,7 +405,7 @@ export function createAntigravityMcpServer(options = {}) {
             structuredContent: { ok: false, available: false, cliVersion: null, quota: 'desconocida', quotaExhausted: null, resetsIn: null },
           };
         }
-        const versionRes = await runProcess({ executable, args: ['--version'], cwd: assertPlainCwd(probeCwd), env: sanitizedEnv(), timeoutMs: STATUS_TIMEOUT_MS });
+        const versionRes = await runProcess({ executable, args: ['--version'], cwd: policy.authorize(probeCwd), env: sanitizedEnv(), timeoutMs: STATUS_TIMEOUT_MS });
         const versionText = versionRes.exitCode === 0 && !versionRes.truncated && !versionRes.timedOut ? asNonEmptyString(versionRes.stdout) : null;
         const cliVersion = versionText && CLI_VERSION.test(versionText) ? versionText : null;
         let quota = 'no comprobada';
@@ -413,6 +417,7 @@ export function createAntigravityMcpServer(options = {}) {
             prompt: 'Responde solo con la palabra OK. No uses herramientas.',
             mode: 'plan',
             timeoutSec: PROBE_TIMEOUT_SEC,
+            recordSession: false,
           });
           quotaExhausted = probe.structuredContent.quotaExhausted;
           resetsIn = probe.structuredContent.resetsIn;
@@ -432,7 +437,7 @@ export function createAntigravityMcpServer(options = {}) {
       description: 'Lista los modelos que ofrece la CLI de Antigravity para la cuenta activa (sin consumir cuota).',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       handler: async () => {
-        const res = await runProcess({ executable: requireExecutable(), args: ['models'], cwd: assertPlainCwd(probeCwd), env: sanitizedEnv(), timeoutMs: STATUS_TIMEOUT_MS });
+        const res = await runProcess({ executable: requireExecutable(), args: ['models'], cwd: policy.authorize(probeCwd), env: sanitizedEnv(), timeoutMs: STATUS_TIMEOUT_MS });
         if (res.exitCode !== 0 || res.truncated || res.timedOut) throw new BridgeError('No se pudo leer la lista de modelos de Antigravity.');
         const models = String(res.stdout ?? '')
           .split(/\r?\n/)

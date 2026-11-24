@@ -12,7 +12,7 @@ Sustituye `<PUENTES>` por la carpeta de este repositorio y `<PROYECTO>` por una 
 
 ## 1. Comprobar la conexión
 
-**Permiso concedido: comprobación local.** Esta configuración solo ofrece `bridge_ping`. Llama a esa herramienta con `{}`. Devuelve `ARCONTE_OK` sin abrir una CLI, leer el proyecto ni consultar una cuenta.
+**Permite comprobar la conexión local.** Esta configuración solo ofrece `bridge_ping`. Llama a esa herramienta con `{}`. Devuelve `ARCONTE_OK` sin abrir una CLI, leer el proyecto ni consultar una cuenta.
 
 ```json
 {
@@ -22,7 +22,7 @@ Sustituye `<PUENTES>` por la carpeta de este repositorio y `<PROYECTO>` por una 
 }
 ```
 
-Los registros equivalentes de Antigravity en los otros dos clientes son:
+Para registrar el servidor de Antigravity en los otros dos clientes, ejecuta los siguientes comandos.
 
 ```powershell
 codex mcp add antigravity-local -- node "<PUENTES>/antigravity-mcp-server.mjs"
@@ -31,7 +31,7 @@ claude mcp add -s user antigravity-local -- node "<PUENTES>/antigravity-mcp-serv
 
 ## 2. Delegar en un proyecto en solo lectura
 
-**Permiso concedido: consultas y revisiones para un proyecto.** Es la configuración recomendada para empezar a delegar. La raíz se fija en el arranque y `read-only` es el máximo predeterminado. Una llamada puede omitir `cwd` o seleccionar un subdirectorio real de esa raíz. El puente rechaza carpetas ajenas y solicitudes de escritura antes de iniciar una CLI.
+**Permite consultar y revisar un proyecto.** Es la configuración recomendada para empezar a delegar. La raíz se fija en el arranque y `read-only` es el máximo predeterminado. Una llamada puede omitir `cwd` o seleccionar un subdirectorio real de esa raíz. El puente rechaza carpetas ajenas y solicitudes de escritura antes de iniciar una CLI.
 
 ```json
 {
@@ -46,7 +46,7 @@ Por ejemplo, llama a `codex_ask` con `{"prompt":"Resume los archivos de este pro
 
 ## 3. Habilitar escritura y coordinación
 
-**Permiso concedido: solicitar ediciones en el proyecto y enviar o archivar mensajes como una identidad concreta.** La instancia sigue usando el modo de consulta predeterminado hasta que una llamada solicite expresamente una edición. El valor de `--mailbox-as` identifica al cliente remitente. En este ejemplo el cliente es Codex.
+**Permite solicitar ediciones, enviar mensajes y archivar entregas con la identidad elegida.** La instancia sigue usando el modo de consulta predeterminado hasta que una llamada solicite expresamente una edición. El valor de `--mailbox-as` identifica al cliente remitente. En este ejemplo el cliente es Codex.
 
 ```json
 {
@@ -67,11 +67,11 @@ Codex y Claude Code aceptan los mismos argumentos de arranque tras el archivo de
 
 ## Migrar desde la configuración anterior
 
-Un registro con solo `--allow-project-data` ahora **falla en el arranque**. En sus `args`, conserva el archivo y añade `--allow-project-data --project-root "<PROYECTO>" --access read-only` como argumentos separados. Para volver a la comprobación básica, deja únicamente el archivo. Las opciones desconocidas, repetidas, incompletas o incompatibles detienen el servidor. Recarga la conexión MCP en el cliente. Las sesiones anteriores sin procedencia verificable y los mensajes del antiguo buzón global quedan fuera del nuevo ámbito. Inicia una sesión nueva en la raíz elegida.
+Un registro con solo `--allow-project-data` ahora **falla en el arranque**. En los argumentos de arranque, sustituye la antigua opción aislada por `--allow-project-data --project-root "<PROYECTO>" --access read-only` como argumentos separados. Para volver a la comprobación básica, deja únicamente el archivo. Las opciones desconocidas, repetidas, incompletas o incompatibles detienen el servidor. Recarga la conexión MCP en el cliente. Las sesiones anteriores sin procedencia verificable y los mensajes del antiguo buzón global quedan fuera del nuevo ámbito. Inicia una sesión nueva en la raíz elegida. Para migrar una instancia con escritura, termina todos los escritores de la versión anterior y revisa sus cerrojos pendientes antes de activar la nueva rama. Todas las instancias que escriben sobre el mismo proyecto deben usar la misma raíz y el mismo almacén privado.
 
 ## Qué llega al proveedor
 
-Un encargo delegado puede enviar el prompt, instrucciones del proyecto y contenido que lea la CLI al proveedor autenticado. El puente valida la carpeta inicial, los modos y la procedencia local de las sesiones. **La raíz MCP no es un aislamiento del sistema de archivos.** Consulta los límites específicos y el almacenamiento local en [Seguridad y privacidad](SECURITY.md).
+Un encargo delegado puede enviar el prompt, instrucciones del proyecto y contenido que lea la CLI al proveedor autenticado. El puente valida la carpeta inicial, los modos y la procedencia local de las sesiones. **El acceso a archivos depende de la CLI y de los permisos del sistema operativo.** Codex solicita su sandbox, Claude limita las herramientas de lectura a `Read, Grep, Glob` y Antigravity solicita planificación. La raíz admitida por el puente solo fija el directorio de trabajo. Consulta los detalles en [Seguridad y privacidad](SECURITY.md).
 
 La aplicación de escritorio de Antigravity y su CLI tienen historiales distintos. El buzón coordina agentes del mismo proyecto en un equipo. El servidor MCP descarta mensajes mayores de 256 KiB y admite hasta cuatro herramientas simultáneas por proceso. Cuando una petición se rechaza por saturación, el cliente puede reintentar más tarde.
 

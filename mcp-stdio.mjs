@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { once } from 'node:events';
 
@@ -92,23 +91,18 @@ export function assertNativeExecutable(executable) {
   return executable.trim();
 }
 
-/** Serializa únicamente escritores de estos puentes para un mismo cwd. */
-export async function withCwdWriteLock(cwd, server, action, lockDir = join(tmpdir(), 'arconte-mcp-bridges-locks')) {
-  const plainCwd = assertPlainCwd(cwd);
+/** Todos los escritores registrados para una raíz del proyecto comparten un cerrojo. */
+export async function withCwdWriteLock(root, server, action, lockDir) {
+  const boundary = assertPlainCwd(root);
   if (typeof lockDir !== 'string' || !isAbsolute(lockDir)) {
-    throw new BridgeError('El directorio de cerrojos debe ser absoluto y estar fuera del cwd.');
+    throw new BridgeError('El directorio de cerrojos debe ser absoluto y estar fuera del proyecto.');
   }
   const directory = resolve(lockDir);
-  let boundary = plainCwd;
-  for (let cursor = plainCwd; ; cursor = resolve(cursor, '..')) {
-    if (existsSync(join(cursor, '.git'))) { boundary = cursor; break; }
-    if (resolve(cursor, '..') === cursor) break;
-  }
   const inside = relative(boundary, directory);
   if (!inside || (!inside.startsWith(`..${sep}`) && inside !== '..' && !isAbsolute(inside))) {
     throw new BridgeError('El directorio de cerrojos debe estar fuera del cwd.');
   }
-  mkdirSync(directory, { recursive: true });
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
   assertPlainCwd(directory);
   const realBoundary = realpathSync(boundary);
   const key = process.platform === 'win32' ? realBoundary.toLowerCase() : realBoundary;
