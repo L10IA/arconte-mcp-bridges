@@ -320,7 +320,6 @@ test('codex-local MCP: rechaza cwd invalido, UNC, symlink/junction, sandbox no p
     const server = createCodexMcpServer({
       policy: testPolicy(realDir),
       executable: 'C:\\Stub\\codex.exe',
-      defaultCwd: realDir,
       probeCodex: async () => ({
         cliVersion: 'codex-cli 0.163.0',
         account: { type: 'chatgpt', planType: 'pro' },

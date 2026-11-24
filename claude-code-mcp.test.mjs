@@ -30,12 +30,10 @@ function makeWorkspace(t) {
     rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const cwd = join(base, 'repo');
-  const claudeHome = join(base, '.claude');
   const outside = join(base, 'outside');
   mkdirSync(join(cwd, '.git'), { recursive: true });
-  mkdirSync(join(claudeHome, 'projects'), { recursive: true });
   mkdirSync(outside, { recursive: true });
-  return { base, cwd, claudeHome, outside };
+  return { base, cwd, outside };
 }
 
 test('claude-code-local MCP: initialize, tools/list, status, ask, review, list_sessions y seguridad', async t => {
@@ -183,10 +181,11 @@ test('claude-code-local MCP: initialize, tools/list, status, ask, review, list_s
   assert.match(revCall.stdinText, /packages\/mcp-bridges/);
   assert.equal(revRes.result.structuredContent.ok, true);
 
-  // Los archivos nativos preexistentes no acreditan procedencia ni se enumeran.
-  const slugDir = join(w.claudeHome, 'projects', resolve(w.cwd).replace(/[^a-zA-Z0-9]/g, '-'));
-  mkdirSync(slugDir, { recursive: true });
-  writeFileSync(join(slugDir, '22222222-2222-4222-8222-222222222222.jsonl'), '{}');
+  // Solo se pueden continuar los identificadores registrados durante un turno del proyecto.
+  const count = calls.length;
+  const unverified = await call(server, 'claude_ask', { prompt: 'Continuar', sessionId: '22222222-2222-4222-8222-222222222222' });
+  assert.equal(unverified.result.isError, true);
+  assert.equal(calls.length, count);
   const sessions = await call(server, 'claude_list_sessions', { cwd: w.cwd });
   assert.deepEqual(sessions.result.structuredContent.sessions.map(s => s.sessionId), ['11111111-1111-4111-8111-111111111111']);
   assert.ok((await call(server, 'claude_list_sessions', { cwd: w.outside })).result.isError);

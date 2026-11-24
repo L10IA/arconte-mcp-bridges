@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -116,6 +116,13 @@ test('el buzón exige identidad, proyecto, acceso de escritura y propiedad de ba
   denied(await call(sender, 'buzon_list', { buzon: 'claude-code' }));
   denied(await call(instance(null), 'buzon_list', { buzon: 'codex' }));
   assert.equal(existsSync(w.mailboxDir), false);
+  const listed = await sender.handleMessage({ id: 2, jsonrpc: '2.0', method: 'tools/list', params: {} });
+  const descriptors = Object.fromEntries(listed.result.tools.map(tool => [tool.name, tool.inputSchema.properties]));
+  assert.deepEqual(descriptors.buzon_list.buzon.enum, ['codex', 'archivo']);
+  assert.deepEqual(descriptors.buzon_read.buzon.enum, ['codex', 'archivo']);
+  assert.deepEqual(descriptors.buzon_archive.buzon.enum, ['codex']);
+  assert.deepEqual(descriptors.buzon_send.de.enum, ['codex']);
+  assert.deepEqual(descriptors.buzon_send.para.enum, ['antigravity', 'claude-code']);
   const sent = await call(sender, 'buzon_send', message), id = sent.result.structuredContent.id;
   const args = { buzon: 'claude-code', id };
   denied(await call(sender, 'buzon_read', args));
@@ -319,4 +326,27 @@ test('las peticiones saturadas a Antigravity no ejecutan el proveedor y luego pu
   io.send(rpc(20, 'antigravity_ask', { prompt: 'Reintento' }));
   assert.ok((await io.take()).result.structuredContent.ok);
   assert.equal(calls, MAX_IN_FLIGHT + 1);
+});
+
+test('archivar comprueba tamaño e identidad antes de crear la copia', async t => {
+  const w = workspace(t), p = w.policy({ mailboxAs: 'codex', access: 'read-write' });
+  const server = doubles(p).agy, root = p.mailboxRoot(true);
+  const inbox = join(root, 'para-codex'), archive = join(root, 'archivo-codex');
+  mkdirSync(inbox, { mode: 0o700 });
+  const id = '20260101-0101-claude-code-ejemplo', file = join(inbox, id + '.md');
+  writeFileSync(file, Buffer.alloc(256 * 1024 + 1));
+  const archiveMessage = () => call(server, 'buzon_archive', { buzon: 'codex', id });
+  denied(await archiveMessage());
+  assert.equal(existsSync(archive), false);
+  writeFileSync(file, 'contenido de prueba');
+  const alias = join(inbox, 'segunda-referencia');
+  linkSync(file, alias);
+  denied(await archiveMessage());
+  assert.equal(existsSync(archive), false);
+  rmSync(alias);
+  const done = await archiveMessage();
+  assert.equal(done.result.structuredContent.sourceCleanupPending, false);
+  assert.equal(existsSync(file), false);
+  assert.deepEqual(readdirSync(archive), [id + '.md']);
+  assert.equal(readFileSync(join(archive, id + '.md'), 'utf8'), 'contenido de prueba');
 });
