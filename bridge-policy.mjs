@@ -55,6 +55,10 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     if (inside(project, storage) || inside(storage, project)) throw new BridgeError('El estado privado debe estar fuera del proyecto.');
     directory(storage, false, storage);
   }
+  // Una actualización en la misma carpeta conserva el estado. Los cerrojos siguen siendo comunes por proyecto.
+  const installation = createHash('sha256').update(realpathSync.native(import.meta.dirname)).digest('hex');
+  const scope = join('installations', installation);
+  const state = join(base, scope);
   function authorize(cwd = project) {
     const activeRoot = canonical(project);
     const stat = lstatSync(activeRoot, { bigint: true });
@@ -71,13 +75,13 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     return path;
   }
   function sessionDirectory(provider, create) {
-    return directory(join(base, 'sessions', projectKey, provider), create, base);
+    return directory(join(state, 'sessions', projectKey, provider), create, base);
   }
   function prepareSession(provider) {
     // El registro necesita creación exclusiva en ambos directorios y enlaces duros entre archivos del mismo directorio.
     try {
       const sessions = sessionDirectory(provider, true);
-      const owners = directory(join(base, 'owners', provider), true, base);
+      const owners = directory(join(state, 'owners', provider), true, base);
       const probe = '.' + randomUUID();
       const sessionTest = join(sessions, probe);
       closeSync(openSync(sessionTest, 'wx', 0o600));
@@ -101,7 +105,7 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     return path;
   }
   function outputFile() {
-    const file = join(directory(join(base, 'output'), true, base), randomUUID() + '.txt');
+    const file = join(directory(join(state, 'output'), true, base), randomUUID() + '.txt');
     closeSync(openSync(file, 'wx', 0o600));
     return file;
   }
@@ -110,7 +114,7 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
     return stat?.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size === 0 ? stat : null;
   }
   function owned(provider, id) {
-    const owners = directory(join(base, 'owners', provider), false, base);
+    const owners = directory(join(state, 'owners', provider), false, base);
     if (!owners) return false;
     const path = join(owners, id.toLowerCase());
     const entry = lstatSync(path, { throwIfNoEntry: false });
@@ -124,7 +128,7 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
   }
   function remember(provider, id) {
     if (typeof id !== 'string' || !uuid.test(id)) throw new BridgeError('La CLI no devolvió un identificador de sesión válido.');
-    const owners = directory(join(base, 'owners', provider), true, base);
+    const owners = directory(join(state, 'owners', provider), true, base);
     const target = join(owners, id.toLowerCase());
     if (!owned(provider, id)) {
       const pending = join(owners, '.' + randomUUID());
@@ -150,7 +154,7 @@ export function createProjectPolicy({ root, access = 'read-only', mailboxAs = nu
   }
   return Object.freeze({ root: project, access, mailboxAs, authorize, requireSession, prepareSession, remember, sessions,
     installedExecutable, outputFile, lockDirectory: () => directory(join(base, 'locks'), true, base),
-    mailboxRoot: create => directory(join(mail, projectKey), create, mail) });
+    mailboxRoot: create => directory(join(mail, scope, projectKey), create, inside(base, mail) ? base : mail) });
 }
 
 export function startBridge(name, factory, flags = process.argv.slice(2)) {

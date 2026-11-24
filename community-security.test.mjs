@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { createProjectPolicy } from './bridge-policy.mjs';
 import { createAntigravityMcpServer } from './antigravity-mcp-server.mjs';
@@ -29,6 +29,13 @@ function workspace(t) {
   const stateDir = join(base, 'estado'), mailboxDir = join(base, 'mensajes');
   const policy = (options = {}) => createProjectPolicy({ root, stateDir, mailboxDir, ...options });
   return { base, root, sibling, child, stateDir, mailboxDir, policy };
+}
+
+function onlyInstallation(stateDir) {
+  const installations = join(stateDir, 'installations');
+  const entries = readdirSync(installations);
+  assert.equal(entries.length, 1);
+  return join(installations, entries[0]);
 }
 
 function doubles(policy, id = idA) {
@@ -60,6 +67,60 @@ test('los tres servidores anuncian la versión distribuida en los dos modos de a
       assert.equal(child.status, 0, child.stderr);
       assert.deepEqual(JSON.parse(child.stdout).result.serverInfo, { name: provider + '-local', version: release });
     }
+  }
+});
+
+test('dos instalaciones del mismo usuario mantienen sus sesiones y salidas separadas y coordinan la escritura', async t => {
+  const w = workspace(t), other = join(w.base, 'otra-instalacion');
+  mkdirSync(other);
+  for (const name of ['bridge-policy.mjs', 'mcp-stdio.mjs']) copyFileSync(join(here, name), join(other, name));
+  const second = await import(pathToFileURL(join(other, 'bridge-policy.mjs')).href);
+  const a = w.policy({ access: 'read-write' });
+  const b = second.createProjectPolicy({ root: w.root, stateDir: w.stateDir, mailboxDir: w.mailboxDir, access: 'read-write' });
+  for (const provider of ['codex', 'antigravity', 'claude-code']) {
+    a.remember(provider, idA);
+    assert.equal(a.sessions(provider, 10).total, 1);
+    assert.equal(b.sessions(provider, 10).total, 0);
+    assert.throws(() => b.requireSession(provider, idA), /procedencia/);
+    b.remember(provider, idB);
+    assert.throws(() => a.requireSession(provider, idB), /procedencia/);
+  }
+  assert.notEqual(dirname(a.outputFile()), dirname(b.outputFile()));
+  assert.equal(a.lockDirectory(), b.lockDirectory());
+  const writer = doubles(b);
+  const held = createAntigravityMcpServer({ policy: a, executable: 'agy.exe', runProcess: async () => {
+    denied(await call(writer.codex, 'codex_ask', { prompt: 'Editar', sandbox: 'workspace-write' }));
+    assert.equal(writer.calls.length, 0);
+    return { exitCode: 0, stdout: JSON.stringify({ status: 'SUCCESS', response: 'fin', conversation_id: idA }) };
+  } });
+  assert.ok((await call(held, 'antigravity_ask', { prompt: 'Editar', mode: 'accept-edits' })).result.structuredContent.ok);
+});
+
+test('los buzones de dos instalaciones permanecen separados con la base predeterminada o una base común explícita', t => {
+  const w = workspace(t), other = join(w.base, 'otra-instalacion');
+  mkdirSync(other);
+  for (const name of ['antigravity-mcp-server.mjs', 'claude-code-mcp-server.mjs', 'codex-mcp-server.mjs', 'bridge-policy.mjs', 'mcp-stdio.mjs']) {
+    copyFileSync(join(here, name), join(other, name));
+  }
+  for (const override of [false, true]) {
+    const env = testEnv(w.base);
+    if (override) env.ARCONTE_BUZON_DIR = w.mailboxDir;
+    const invoke = (install, identity, tool, args) => {
+      const cmd = [join(install, 'antigravity-mcp-server.mjs'), '--allow-project-data', '--project-root', w.root,
+        '--access', 'read-write', '--mailbox-as', identity];
+      const child = spawnSync(process.execPath, cmd, { cwd: w.base, env, encoding: 'utf8', timeout: 8000,
+        input: JSON.stringify(rpc(1, tool, args)) + '\n', windowsHide: true });
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout);
+    };
+    const sent = invoke(here, 'codex', 'buzon_send', { para: 'claude-code', tipo: 'aviso', asunto: 'Entrega', cuerpo: 'Ejemplo ficticio' });
+    const id = sent.result.structuredContent.id;
+    const inbox = { buzon: 'claude-code' };
+    assert.equal(invoke(here, 'claude-code', 'buzon_list', inbox).result.structuredContent.total, 1);
+    assert.equal(invoke(other, 'claude-code', 'buzon_list', inbox).result.structuredContent.total, 0);
+    denied(invoke(other, 'claude-code', 'buzon_read', { ...inbox, id }));
+    denied(invoke(other, 'claude-code', 'buzon_archive', { ...inbox, id }));
+    assert.match(invoke(here, 'claude-code', 'buzon_read', { ...inbox, id }).result.content[0].text, /Ejemplo ficticio/);
   }
 });
 
@@ -270,7 +331,7 @@ test('la delegación verifica el almacén antes de la CLI y distingue un fallo d
   assert.equal(h.calls.length, 0);
   rmSync(w.stateDir);
   const server = createAntigravityMcpServer({ policy: w.policy(), executable: 'agy.exe', runProcess: async () => {
-    const owners = join(w.stateDir, 'owners');
+    const owners = join(onlyInstallation(w.stateDir), 'owners');
     renameSync(owners, owners + '-anterior');
     writeFileSync(owners, 'prueba');
     return { exitCode: 0, stdout: JSON.stringify({ status: 'SUCCESS', response: 'respuesta reservada de prueba', conversation_id: idB }) };
@@ -311,7 +372,7 @@ test('la CLI instalada y la salida de Codex permanecen fuera del proyecto', asyn
   const h = doubles(p);
   await call(h.codex, 'codex_ask', { prompt: 'Consulta' });
   const file = h.calls.at(-1).tmpOutFile;
-  assert.equal(dirname(file), join(w.stateDir, 'output'));
+  assert.equal(dirname(file), join(onlyInstallation(w.stateDir), 'output'));
   assert.deepEqual(readdirSync(dirname(file)), []);
 });
 
