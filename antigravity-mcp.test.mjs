@@ -145,6 +145,16 @@ test('antigravity-local informa la cuota agotada y cuándo se restablece', async
   assert.equal(ask.result.structuredContent.quotaExhausted, true);
   assert.equal(ask.result.structuredContent.resetsIn, '1h9m37s');
   assert.match(ask.result.content[0].text, /cuota agotada.*1h9m37s.*buzon_send/);
+  for (const options of [{ mailboxAs: null, access: 'read-write' }, { mailboxAs: 'codex', access: 'read-only' }]) {
+    const limited = makeServer(dirs, async () => ({ stdout: QUOTA_JSON, exitCode: 3 }), { policy: testPolicy(dirs.cwd, options) });
+    const init = await limited.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    assert.doesNotMatch(init.result.instructions, /buzon_send/);
+    for (const prompt of ['Consulta', 'x'.repeat(24001)]) {
+      const result = await call(limited, 'antigravity_ask', { prompt });
+      assert.equal(result.result.isError, true);
+      assert.doesNotMatch(result.result.content[0].text, /buzon_send/);
+    }
+  }
 
   const status = await call(server, 'antigravity_status', { probe: true });
   assert.equal(status.result.structuredContent.ok, false);

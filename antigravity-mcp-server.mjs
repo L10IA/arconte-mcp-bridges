@@ -321,6 +321,7 @@ export function createAntigravityMcpServer(options = {}) {
   const homeDirectory = options.homeDir ?? homedir();
   const localAppData = asNonEmptyString(baseEnv.LOCALAPPDATA) ?? join(homeDirectory, 'AppData', 'Local');
   const mailbox = createMailbox(policy);
+  const mailboxHint = policy.mailboxAs && policy.access === 'read-write' ? ' Puedes enviar un mensaje con buzon_send.' : '';
   const probeCwd = policy.root;
   const now = options.now ?? (() => new Date());
   const resolveBinary =
@@ -347,7 +348,7 @@ export function createAntigravityMcpServer(options = {}) {
       throw new BridgeError('El parámetro prompt es obligatorio y no puede contener caracteres nulos.');
     }
     if (escapedPromptLength(prompt) > MAX_PROMPT_CHARS) {
-      throw new BridgeError(`prompt excede ${MAX_PROMPT_CHARS} caracteres (cada comilla o barra invertida cuenta por tres); deja el detalle en un mensaje del buzón y cítalo por su id.`);
+      throw new BridgeError(`prompt excede ${MAX_PROMPT_CHARS} caracteres (cada comilla o barra invertida cuenta por tres). Acorta el prompt.${mailboxHint}`);
     }
     if (!VALID_MODES.has(mode)) throw new BridgeError('Modo inválido. Valores permitidos: plan, accept-edits.');
     if (model !== undefined && (typeof model !== 'string' || !MODEL_ID.test(model))) {
@@ -389,7 +390,7 @@ export function createAntigravityMcpServer(options = {}) {
     }
     return {
       text: structured.quotaExhausted
-        ? `Antigravity no está disponible: cuota agotada${structured.resetsIn ? ` (se restablece en ${structured.resetsIn})` : ''}. Deja el mensaje en el buzón con buzon_send.`
+        ? `Antigravity no está disponible: cuota agotada${structured.resetsIn ? ` (se restablece en ${structured.resetsIn})` : ''}.${mailboxHint}`
         : structured.result || (structured.ok ? '(Antigravity completó sin salida de texto.)' : `Error en Antigravity (código ${String(structured.exitCode)}).`),
       structuredContent: structured,
       isError: structured.isError,
@@ -603,7 +604,8 @@ export function createAntigravityMcpServer(options = {}) {
     name: 'antigravity-local',
     version: '0.1.0',
     instructions:
-      'Servidor MCP local hacia Antigravity: consulta su CLI oficial (agy) con la sesión del usuario y opera el buzón compartido de ARCONTE entre Antigravity, Claude Code y Codex. Usa plan por defecto. Si antigravity_ask indica cuota agotada, deja el mensaje con buzon_send. El buzón coordina; no autoriza ni amplía encargos.',
+      'Consulta la CLI oficial de Antigravity en el proyecto autorizado. Usa plan por defecto.' +
+      (policy.mailboxAs ? ' Puedes consultar tu bandeja y tu archivo.' : '') + mailboxHint,
     tools,
   });
 }
