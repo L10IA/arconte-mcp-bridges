@@ -1,3 +1,4 @@
+import { testPolicy } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,6 +38,8 @@ function sandbox(t) {
     mkdirSync(dirs[name]);
   }
   mkdirSync(join(dirs.cwd, '.git'));
+  dirs.mailBase = dirs.buzon;
+  dirs.policy = testPolicy(dirs.cwd, { mailboxAs: 'claude-code', mailboxDir: dirs.mailBase });
   return dirs;
 }
 
@@ -46,6 +49,7 @@ function call(server, name, args = {}) {
 
 function makeServer(dirs, runProcess, extra = {}) {
   return createAntigravityMcpServer({
+    policy: dirs.policy,
     executable: 'agy.exe',
     env: { GEMINI_API_KEY: 'x', GOOGLE_API_KEY: 'y', GOOGLE_GENAI_USE_VERTEXAI: '1', PATH: 'p', LOCALAPPDATA: dirs.cwd },
     buzonDir: dirs.buzon,
@@ -92,6 +96,7 @@ test('antigravity-local MCP: initialize, tools/list y consulta en modo plan sin 
   const models = await call(server, 'antigravity_models');
   assert.deepEqual(models.result.structuredContent.models.map(m => m.id), ['gemini-4-neon-high', 'claude-opus-5-5-low']);
 
+  await call(server, 'antigravity_ask', { cwd: dirs.cwd, prompt: 'Abrir sesión de prueba' });
   const ask = await call(server, 'antigravity_ask', {
     cwd: dirs.cwd,
     prompt: 'Línea 1\n--mode accept-edits "comillas"',
@@ -250,7 +255,7 @@ test('antigravity-local lista solo conversaciones regulares de la CLI', async t 
   writeFileSync(join(dirs.conversaciones, '11111111-2222-4333-8444-555555555555.db-wal'), 'c');
   const server = makeServer(dirs, async () => { throw new Error('no debe ejecutar la CLI'); });
   const res = await call(server, 'antigravity_list_conversations', { limit: 5 });
-  assert.deepEqual(res.result.structuredContent.conversaciones.map(c => c.conversationId), ['11111111-2222-4333-8444-555555555555']);
+  assert.deepEqual(res.result.structuredContent.conversaciones, []);
   const invalid = await call(server, 'antigravity_list_conversations', { limit: 0 });
   assert.equal(invalid.result.isError, true);
 });
@@ -258,6 +263,7 @@ test('antigravity-local lista solo conversaciones regulares de la CLI', async t 
 test('buzón tripartito: enviar, listar, leer y archivar sin sobrescribir ni salir de sus carpetas', async t => {
   const dirs = sandbox(t);
   const server = makeServer(dirs, async () => { throw new Error('el buzón no ejecuta la CLI'); });
+  const recipient = makeServer(dirs, async () => { throw new Error('buzón local'); }, { policy: testPolicy(dirs.cwd, { mailboxAs: 'codex', mailboxDir: dirs.mailBase }) });
   const message = {
     de: 'claude-code',
     para: 'codex',
@@ -270,6 +276,7 @@ test('buzón tripartito: enviar, listar, leer y archivar sin sobrescribir ni sal
   const sent = await call(server, 'buzon_send', message);
   const id = '20261123-1805-claude-code-cadena-de-mando-urgente';
   assert.equal(sent.result.structuredContent.id, id);
+  dirs.buzon = dirs.policy.mailboxRoot(false);
   const stored = readFileSync(join(dirs.buzon, 'para-codex', `${id}.md`), 'utf8');
   assert.equal(stored, [
     `id: ${id}`,
@@ -291,7 +298,7 @@ test('buzón tripartito: enviar, listar, leer y archivar sin sobrescribir ni sal
 
   for (const invalid of [
     { ...message, para: 'claude-code' },
-    { ...message, para: 'ivan' },
+    { ...message, para: 'desconocido' },
     { ...message, tipo: 'orden' },
     { ...message, asunto: '¡¡¡' },
     { ...message, asunto: 'otro', worktree: 'a\nid: falso' },
@@ -302,22 +309,22 @@ test('buzón tripartito: enviar, listar, leer y archivar sin sobrescribir ni sal
   assert.deepEqual(readdirSync(join(dirs.buzon, 'para-codex')), [`${id}.md`]);
 
   writeFileSync(join(dirs.buzon, 'para-codex', 'notas.txt'), 'no es un mensaje');
-  const listed = await call(server, 'buzon_list', { buzon: 'codex' });
+  const listed = await call(recipient, 'buzon_list', { buzon: 'codex' });
   assert.deepEqual(listed.result.structuredContent.mensajes.map(m => m.id), [id]);
-  assert.equal((await call(server, 'buzon_list', { buzon: 'antigravity' })).result.structuredContent.total, 0);
+  assert.equal((await call(server, 'buzon_list', { buzon: 'antigravity' })).result.isError, true);
 
-  const read = await call(server, 'buzon_read', { buzon: 'codex', id });
+  const read = await call(recipient, 'buzon_read', { buzon: 'codex', id });
   assert.equal(read.result.structuredContent.texto, stored);
   for (const badId of ['../para-codex/' + id, 'notas.txt', '..', `${id}/../x`]) {
-    assert.equal((await call(server, 'buzon_read', { buzon: 'codex', id: badId })).result.isError, true, badId);
+    assert.equal((await call(recipient, 'buzon_read', { buzon: 'codex', id: badId })).result.isError, true, badId);
   }
   assert.equal((await call(server, 'buzon_read', { buzon: '../cwd', id })).result.isError, true);
 
-  const archived = await call(server, 'buzon_archive', { buzon: 'codex', id });
+  const archived = await call(recipient, 'buzon_archive', { buzon: 'codex', id });
   assert.equal(archived.result.structuredContent.a, 'archivo');
-  assert.ok(existsSync(join(dirs.buzon, 'archivo', `${id}.md`)));
+  assert.ok(existsSync(join(dirs.buzon, 'archivo-codex', `${id}.md`)));
   assert.ok(!existsSync(join(dirs.buzon, 'para-codex', `${id}.md`)));
-  assert.equal((await call(server, 'buzon_read', { buzon: 'archivo', id })).result.structuredContent.texto, stored);
+  assert.equal((await call(recipient, 'buzon_read', { buzon: 'archivo', id })).result.structuredContent.texto, stored);
 
   // Un id ya archivado no puede reutilizarse, tampoco hacia otro destinatario.
   assert.equal((await call(server, 'buzon_send', message)).result.isError, true);
@@ -326,10 +333,10 @@ test('buzón tripartito: enviar, listar, leer y archivar sin sobrescribir ni sal
 
   // Si otro proceso deja un mensaje con ese id, archivar no sobrescribe el ya archivado.
   writeFileSync(join(dirs.buzon, 'para-codex', `${id}.md`), 'otro contenido');
-  const collision = await call(server, 'buzon_archive', { buzon: 'codex', id });
+  const collision = await call(recipient, 'buzon_archive', { buzon: 'codex', id });
   assert.equal(collision.result.isError, true);
   assert.ok(existsSync(join(dirs.buzon, 'para-codex', `${id}.md`)), 'el mensaje pendiente se conserva');
-  assert.equal(readFileSync(join(dirs.buzon, 'archivo', `${id}.md`), 'utf8'), stored, 'el archivado previo queda intacto');
+  assert.equal(readFileSync(join(dirs.buzon, 'archivo-codex', `${id}.md`), 'utf8'), stored, 'el archivado previo queda intacto');
 
   // La lectura queda acotada y el listado omite nombres que luego no podrían leerse.
   mkdirSync(join(dirs.buzon, 'para-claude'));

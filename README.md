@@ -1,63 +1,80 @@
 # ARCONTE MCP Bridges
 
-Conecta Antigravity Desktop, Codex y Claude Code mediante tres servidores locales del Model Context Protocol (MCP). Cada servidor usa entrada y salida estándar. El código funciona con Node.js 24.14 o posterior y usa solo módulos de Node. La integración con las CLI se ha probado en Windows.
+Tres servidores MCP locales conectan Antigravity Desktop con Codex y Claude Code mediante sus CLI oficiales. Usan entrada y salida estándar y los módulos nativos de Node.js. Instala Node.js 24.14 o posterior y clona este repositorio. La delegación también requiere la CLI de destino instalada y autenticada.
 
-| Desde | Servidor | Destino en modo de delegación |
+| Servidor | Cliente habitual | Destino |
 | --- | --- | --- |
-| Antigravity Desktop | `codex-local` | Codex CLI |
-| Antigravity Desktop | `claude-code-local` | Claude Code CLI |
-| Codex o Claude Code | `antigravity-local` | Antigravity CLI y buzón local de coordinación |
+| `codex-local` | Antigravity | Codex CLI |
+| `claude-code-local` | Antigravity | Claude Code CLI |
+| `antigravity-local` | Claude Code o Codex | Antigravity CLI y buzón opcional |
 
-## Primera conexión
+Sustituye `<PUENTES>` por la carpeta de este repositorio y `<PROYECTO>` por una carpeta absoluta, existente y local que quieras compartir. Los ejemplos JSON sirven para clientes con configuración `mcpServers`, como Antigravity. Cada ejemplo es una configuración completa independiente. Si el cliente ya tiene servidores, añade solo las entradas que necesites.
 
-Clona este repositorio y registra el archivo del servidor en el cliente de origen. Cada usuario necesita su instalación local de Node. Para delegar tareas también necesita la CLI oficial de destino y una sesión iniciada con ese proveedor.
+## 1. Comprobar la conexión
 
-En Antigravity, añade estas entradas a `mcpServers` de su configuración MCP. Sustituye los marcadores por rutas absolutas locales.
+**Permiso concedido: comprobación local.** Esta configuración solo ofrece `bridge_ping`. Llama a esa herramienta con `{}`. Devuelve `ARCONTE_OK` sin abrir una CLI, leer el proyecto ni consultar una cuenta.
 
 ```json
 {
   "mcpServers": {
-    "codex-local": {
-      "command": "<NODE>",
-      "args": ["<DIRECTORIO>/codex-mcp-server.mjs"]
-    },
-    "claude-code-local": {
-      "command": "<NODE>",
-      "args": ["<DIRECTORIO>/claude-code-mcp-server.mjs"]
-    }
+    "claude-code-local": { "command": "node", "args": ["<PUENTES>/claude-code-mcp-server.mjs"] }
   }
 }
 ```
 
-En Codex o Claude Code puedes registrar Antigravity desde su respectiva CLI.
+Los registros equivalentes de Antigravity en los otros dos clientes son:
 
 ```powershell
-codex mcp add antigravity-local -- "<NODE>" "<DIRECTORIO>/antigravity-mcp-server.mjs"
-claude mcp add -s user antigravity-local -- "<NODE>" "<DIRECTORIO>/antigravity-mcp-server.mjs"
+codex mcp add antigravity-local -- node "<PUENTES>/antigravity-mcp-server.mjs"
+claude mcp add -s user antigravity-local -- node "<PUENTES>/antigravity-mcp-server.mjs"
 ```
 
-Recarga el servidor en el cliente, abre su lista de herramientas y llama a `bridge_ping` con `{}`. La respuesta esperada es **ARCONTE_OK**. En este modo el puente comprueba el transporte MCP local. El proveedor no recibe ninguna consulta.
+## 2. Delegar en un proyecto en solo lectura
 
-## Delegación de proyectos
+**Permiso concedido: consultas y revisiones para un proyecto.** Es la configuración recomendada para empezar a delegar. La raíz se fija en el arranque y `read-only` es el máximo predeterminado. Una llamada puede omitir `cwd` o seleccionar un subdirectorio real de esa raíz. El puente rechaza carpetas ajenas y solicitudes de escritura antes de iniciar una CLI.
 
-Para habilitar las herramientas de trabajo, añade `--allow-project-data` como único argumento después del archivo `.mjs` y vuelve a conectar el servidor. Por ejemplo, `"args": ["<DIRECTORIO>/claude-code-mcp-server.mjs", "--allow-project-data"]`.
+```json
+{
+  "mcpServers": {
+    "codex-local": { "command": "node", "args": ["<PUENTES>/codex-mcp-server.mjs", "--allow-project-data", "--project-root", "<PROYECTO>", "--access", "read-only"] },
+    "claude-code-local": { "command": "node", "args": ["<PUENTES>/claude-code-mcp-server.mjs", "--allow-project-data", "--project-root", "<PROYECTO>", "--access", "read-only"] }
+  }
+}
+```
 
-| Servidor | Herramientas disponibles al habilitar delegación |
+Por ejemplo, llama a `codex_ask` con `{"prompt":"Resume los archivos de este proyecto de ejemplo."}`. Codex y Claude admiten revisión. Antigravity usa `antigravity_ask` en modo `plan`. Cada proveedor conserva sus mecanismos de autenticación y sus propios límites de acceso a archivos.
+
+## 3. Habilitar escritura y coordinación
+
+**Permiso concedido: solicitar ediciones en el proyecto y enviar o archivar mensajes como una identidad concreta.** La instancia sigue usando el modo de consulta predeterminado hasta que una llamada solicite expresamente una edición. El valor de `--mailbox-as` identifica al cliente remitente. En este ejemplo el cliente es Codex.
+
+```json
+{
+  "mcpServers": {
+    "antigravity-local": { "command": "node", "args": ["<PUENTES>/antigravity-mcp-server.mjs", "--allow-project-data", "--project-root", "<PROYECTO>", "--access", "read-write", "--mailbox-as", "codex"] }
+  }
+}
+```
+
+Codex y Claude Code aceptan los mismos argumentos de arranque tras el archivo del servidor. Para dar a Claude Code su propia bandeja, usa `--mailbox-as claude-code` en su registro. En `codex-local` y `claude-code-local`, la opción de escritura es `--access read-write`; la identidad de buzón solo está disponible en `antigravity-local`.
+
+| Operación | Requisito |
 | --- | --- |
-| Codex | `codex_status`, `codex_models`, `codex_ask`, `codex_review` |
-| Claude Code | `claude_status`, `claude_ask`, `claude_review`, `claude_list_sessions` |
-| Antigravity | `antigravity_status`, `antigravity_models`, `antigravity_ask`, `antigravity_list_conversations`, `buzon_list`, `buzon_read`, `buzon_send`, `buzon_archive` |
+| Consultar, revisar, listar o reanudar sesiones del proyecto | Delegación y raíz autorizada. Las sesiones deben haber sido registradas por este puente y proveedor para esa raíz. |
+| Solicitar escritura de proyecto | `--access read-write` y la opción de la llamada: `workspace-write` en Codex, `edit` en Claude o `accept-edits` en Antigravity. |
+| Consultar bandeja y archivo propios | Una identidad local entre `antigravity`, `claude-code` y `codex`. |
+| Enviar a otro agente o archivar una entrega propia | Identidad local y `--access read-write`. El argumento opcional `de` debe coincidir con la identidad configurada. |
 
-Las consultas y revisiones se ejecutan en la carpeta indicada por `cwd`. La CLI de destino puede leer archivos de esa carpeta y enviar contexto al proveedor. Una sesión reanudada también puede incluir datos de turnos anteriores. Para regresar al modo de conexión, quita el argumento y recarga el servidor. Consulta [Seguridad y privacidad](SECURITY.md).
+## Migrar desde la configuración anterior
 
-La integración de Antigravity usa su CLI oficial, con un historial distinto al de las conversaciones abiertas en Desktop. Para usar el buzón, crea una carpeta local, limita su acceso y configura `ARCONTE_BUZON_DIR` para el servidor `antigravity-local`. El buzón persiste mensajes en texto en ese equipo.
+Un registro con solo `--allow-project-data` ahora **falla en el arranque**. En sus `args`, conserva el archivo y añade `--allow-project-data --project-root "<PROYECTO>" --access read-only` como argumentos separados. Para volver a la comprobación básica, deja únicamente el archivo. Las opciones desconocidas, repetidas, incompletas o incompatibles detienen el servidor. Recarga la conexión MCP en el cliente. Las sesiones anteriores sin procedencia verificable y los mensajes del antiguo buzón global quedan fuera del nuevo ámbito. Inicia una sesión nueva en la raíz elegida.
 
-## Pruebas
+## Qué llega al proveedor
 
-```sh
-npm test
-```
+Un encargo delegado puede enviar el prompt, instrucciones del proyecto y contenido que lea la CLI al proveedor autenticado. El puente valida la carpeta inicial, los modos y la procedencia local de las sesiones. **La raíz MCP no es un aislamiento del sistema de archivos.** Consulta los límites específicos y el almacenamiento local en [Seguridad y privacidad](SECURITY.md).
 
-La suite usa archivos temporales, dobles de las CLI y mensajes ficticios. Incluye pruebas del transporte stdio real, validación de rutas, concurrencia y privacidad. Puede ejecutarse sin cuentas de los proveedores.
+La aplicación de escritorio de Antigravity y su CLI tienen historiales distintos. El buzón coordina agentes del mismo proyecto en un equipo. El servidor MCP descarta mensajes mayores de 256 KiB y admite hasta cuatro herramientas simultáneas por proceso. Cuando una petición se rechaza por saturación, el cliente puede reintentar más tarde.
 
-El proyecto se distribuye con la [licencia MIT](LICENSE).
+## Probar
+
+Ejecuta `npm test`. La suite usa carpetas temporales, procesos Node para el transporte y dobles de las CLI. No necesita cuentas. [Licencia MIT](LICENSE).

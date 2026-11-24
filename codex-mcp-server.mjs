@@ -8,14 +8,14 @@ import {
   appendBoundedOutput,
   assertNativeExecutable,
   assertPlainCwd,
-  createMcpStdioServer,
+  connectionServer,
   resolveExecutable,
   BridgeError,
   buildCliEnv,
-  startBridge,
   terminateProcessTree,
   withCwdWriteLock,
 } from './mcp-stdio.mjs';
+import { projectServer, startBridge } from './bridge-policy.mjs';
 
 const SERVER_NAME = 'codex-local';
 const SERVER_VERSION = '0.1.15';
@@ -207,11 +207,11 @@ function parseCodexJsonl(stdoutText) {
   return { sessionId, messages };
 }
 
-async function defaultReadCliVersion(executable, env, spawnProcess = spawn, terminate = terminateProcessTree) {
+async function defaultReadCliVersion(executable, env, cwd, spawnProcess = spawn, terminate = terminateProcessTree) {
   return new Promise(resolveVersion => {
     let stdout = '';
     let settled = false;
-    const child = spawnProcess(executable, ['--version'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnProcess(executable, ['--version'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const timer = setTimeout(async () => {
       if (settled) return;
       settled = true;
@@ -239,7 +239,7 @@ async function defaultReadCliVersion(executable, env, spawnProcess = spawn, term
 }
 
 export async function defaultProbeAppServer(executable, env, cwd, { spawnProcess = spawn, terminate = terminateProcessTree } = {}) {
-  const cliVersionPromise = defaultReadCliVersion(executable, env, spawnProcess, terminate);
+  const cliVersionPromise = defaultReadCliVersion(executable, env, cwd, spawnProcess, terminate);
 
   const probePromise = new Promise((resolveProbe, rejectProbe) => {
     const child = spawnProcess(executable, ['app-server', '--listen', 'stdio://'], {
@@ -505,16 +505,11 @@ function buildReviewArgs({ cwd, model, uncommitted, base, hasPrompt, tmpOutFile 
 }
 
 export function createCodexMcpServer(options = {}) {
+  const { policy } = options;
+  if (!policy) return connectionServer(SERVER_NAME);
   const getBaseEnv = () => options.baseEnv ?? process.env;
   const getCleanEnv = () => buildCliEnv(getBaseEnv());
-  const getDefaultCwd = () => {
-    const candidate = options.defaultCwd ?? process.cwd();
-    try {
-      return assertPlainCwd(candidate);
-    } catch {
-      return candidate;
-    }
-  };
+  const getDefaultCwd = () => policy.root;
 
   const resolveCodexBin = () => {
     if (options.resolveCodex) {
@@ -679,7 +674,7 @@ export function createCodexMcpServer(options = {}) {
           ephemeral: { type: 'boolean', default: false },
           timeoutSec: { type: 'number', minimum: 1, maximum: MAX_TIMEOUT_SEC, default: DEFAULT_TIMEOUT_SEC },
         },
-        required: ['cwd', 'prompt'],
+        required: ['prompt'],
         additionalProperties: false,
       },
       handler: async args => {
@@ -817,7 +812,7 @@ export function createCodexMcpServer(options = {}) {
           model: { type: 'string' },
           timeoutSec: { type: 'number', minimum: 1, maximum: MAX_TIMEOUT_SEC, default: DEFAULT_TIMEOUT_SEC },
         },
-        required: ['cwd'],
+        required: [],
         additionalProperties: false,
       },
       handler: async args => {
@@ -905,7 +900,7 @@ export function createCodexMcpServer(options = {}) {
     },
   ];
 
-  return createMcpStdioServer({
+  return projectServer(policy, {
     name: SERVER_NAME,
     version: options.version ?? SERVER_VERSION,
     instructions:

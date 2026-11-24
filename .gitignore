@@ -1,6 +1,8 @@
 # Solo se versionan los archivos de la distribución.
 /*
 !/.gitignore
+!/bridge-policy.mjs
+!/community-security.test.mjs
 !/LICENSE
 !/README.md
 !/SECURITY.md
@@ -13,3 +15,5 @@
 !/mcp-stdio.mjs
 !/package.json
 !/privacy-mcp.test.mjs
+
+!/test-policy.mjs

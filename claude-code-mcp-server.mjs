@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { lstatSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,14 +6,14 @@ import {
   appendBoundedOutput,
   assertNativeExecutable,
   assertPlainCwd,
-  createMcpStdioServer,
+  connectionServer,
   resolveExecutable,
   BridgeError,
   buildCliEnv,
-  startBridge,
   terminateProcessTree,
   withCwdWriteLock,
 } from './mcp-stdio.mjs';
+import { projectServer, startBridge } from './bridge-policy.mjs';
 
 const DEFAULT_MODEL = 'claude-fable-5-2';
 const DEFAULT_TIMEOUT_SEC = 240;
@@ -270,84 +269,6 @@ export async function defaultRunProcess({
   });
 }
 
-function assertPlainDirectoryEntry(path, label) {
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new BridgeError(`No se permiten enlaces simbólicos ni rutas no válidas en ${label}.`);
-  }
-}
-
-function listClaudeSessionsForCwd({ cwd, claudeHome, limit = 20 }) {
-  const plainCwd = assertPlainCwd(cwd);
-  const resolvedCwd = resolve(plainCwd);
-  const slug = resolvedCwd.replace(/[^a-zA-Z0-9]/g, '-');
-  const projectsDir = join(claudeHome, 'projects');
-
-  try {
-    assertPlainDirectoryEntry(claudeHome, 'directorio Claude');
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      return { sessions: [], total: 0, skippedSymlinks: 0 };
-    }
-    throw error;
-  }
-
-  try {
-    assertPlainDirectoryEntry(projectsDir, 'projects de Claude');
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      return { sessions: [], total: 0, skippedSymlinks: 0 };
-    }
-    throw error;
-  }
-
-  const slugDir = join(projectsDir, slug);
-  try {
-    assertPlainDirectoryEntry(slugDir, 'directorio del proyecto');
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      return { sessions: [], total: 0, skippedSymlinks: 0 };
-    }
-    throw error;
-  }
-
-  let skippedSymlinks = 0;
-  const all = [];
-  for (const name of readdirSync(slugDir)) {
-    if (!name.endsWith('.jsonl') || !SESSION_ID.test(name.slice(0, -6))) continue;
-    const filePath = join(slugDir, name);
-    let stat;
-    try {
-      stat = lstatSync(filePath);
-    } catch {
-      continue;
-    }
-    if (stat.isSymbolicLink()) {
-      skippedSymlinks += 1;
-      continue;
-    }
-    if (!stat.isFile()) continue;
-    all.push({
-      sessionId: name.slice(0, -6),
-      modifiedAt: new Date(stat.mtimeMs).toISOString(),
-      sizeBytes: stat.size,
-      mtimeMs: stat.mtimeMs,
-    });
-  }
-
-  all.sort((a, b) => b.mtimeMs - a.mtimeMs || a.sessionId.localeCompare(b.sessionId));
-  const sessions = all.slice(0, limit).map(({ sessionId, modifiedAt, sizeBytes }) => ({
-    sessionId,
-    modifiedAt,
-    sizeBytes,
-  }));
-
-  return {
-    sessions,
-    total: all.length,
-    skippedSymlinks,
-  };
-}
 
 function buildReviewPrompt({ target, focus }) {
   const parts = [
@@ -362,9 +283,10 @@ function buildReviewPrompt({ target, focus }) {
 }
 
 export function createClaudeCodeMcpServer(options = {}) {
+  const { policy } = options;
+  if (!policy) return connectionServer('claude-code-local');
   const baseEnv = options.env ?? process.env;
   const homeDirectory = options.homeDir ?? homedir();
-  const claudeHome = options.claudeHome ?? join(homeDirectory, '.claude');
   const resolveBinary =
     options.resolveExecutable ??
     (() =>
@@ -503,7 +425,7 @@ export function createClaudeCodeMcpServer(options = {}) {
         }
 
         const env = sanitizedEnv();
-        const cwd = process.cwd();
+        const cwd = policy.root;
         const versionRes = await runProcess({
           executable,
           args: ['--version'],
@@ -548,7 +470,7 @@ export function createClaudeCodeMcpServer(options = {}) {
           maxTurns: { type: 'integer', minimum: 1, maximum: 50 },
           timeoutSec: { type: 'integer', minimum: 5, maximum: 600, default: 240 },
         },
-        required: ['cwd', 'prompt'],
+        required: ['prompt'],
         additionalProperties: false,
       },
       handler: async rawArgs => {
@@ -579,7 +501,7 @@ export function createClaudeCodeMcpServer(options = {}) {
           maxTurns: { type: 'integer', minimum: 1, maximum: 50 },
           timeoutSec: { type: 'integer', minimum: 5, maximum: 600, default: 240 },
         },
-        required: ['cwd'],
+        required: [],
         additionalProperties: false,
       },
       handler: async rawArgs => {
@@ -603,14 +525,14 @@ export function createClaudeCodeMcpServer(options = {}) {
     {
       name: 'claude_list_sessions',
       description:
-        'Lista sesiones JSONL locales recientes de Claude Code para un cwd sin seguir enlaces simbólicos ni consumir tokens.',
+        'Lista únicamente sesiones de Claude Code registradas por el puente para el proyecto autorizado.',
       inputSchema: {
         type: 'object',
         properties: {
           cwd: { type: 'string', description: 'Carpeta absoluta del proyecto.' },
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
         },
-        required: ['cwd'],
+        required: [],
         additionalProperties: false,
       },
       handler: async rawArgs => {
@@ -622,32 +544,17 @@ export function createClaudeCodeMcpServer(options = {}) {
           }
           limit = args.limit;
         }
-        const listing = listClaudeSessionsForCwd({
-          cwd: args.cwd,
-          claudeHome,
-          limit,
-        });
-        const sessionLines = listing.sessions.map(
-          s => `- ${s.sessionId} · ${s.modifiedAt} · ${s.sizeBytes} B`,
-        );
+        const listing = policy.sessions('claude-code', limit);
+        const sessions = listing.entries.map(s => ({ sessionId: s.id, createdAt: s.createdAt }));
         return {
-          text:
-            listing.sessions.length > 0
-              ? [
-                  `${listing.sessions.length} sesión(es) locales encontradas (total: ${listing.total}):`,
-                  ...sessionLines,
-                ].join('\n')
-              : 'No hay sesiones locales registradas para el proyecto.',
-          structuredContent: {
-            ok: true,
-            ...listing,
-          },
+          text: sessions.map(s => s.sessionId).join('\n') || 'No hay sesiones verificadas para el proyecto.',
+          structuredContent: { ok: true, sessions, total: listing.total },
         };
       },
     },
   ];
 
-  return createMcpStdioServer({
+  return projectServer(policy, {
     name: 'claude-code-local',
     version: '0.1.0',
     instructions:

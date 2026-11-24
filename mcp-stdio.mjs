@@ -3,8 +3,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
+import { once } from 'node:events';
 
+export const MAX_MESSAGE_BYTES = 256 * 1024;
+export const MAX_IN_FLIGHT = 4;
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-03-26', '2024-11-05']);
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 
@@ -17,7 +19,8 @@ function isUncPath(value) {
 }
 
 function isValidJsonRpcId(id) {
-  if (id === null || typeof id === 'string') return true;
+  if (id === null) return true;
+  if (typeof id === 'string') return id.length <= 128 && !containsPrivateData(id);
   return typeof id === 'number' && Number.isFinite(id);
 }
 
@@ -366,9 +369,7 @@ export function buildCliEnv(baseEnv = process.env) {
 // Solo los errores redactados por el puente pueden llegar al cliente MCP.
 export class BridgeError extends Error {}
 
-// La autorización de delegar pertenece al arranque local. Una llamada MCP no puede cambiarla.
-export function startBridge(name, createProjectServer, flags = process.argv.slice(2)) {
-  if (flags.length === 1 && flags[0] === '--allow-project-data') return createProjectServer().start();
+export function connectionServer(name) {
   return createMcpStdioServer({
     name,
     version: '1.0.0',
@@ -382,7 +383,7 @@ export function startBridge(name, createProjectServer, flags = process.argv.slic
         return { text: 'ARCONTE_OK', structuredContent: { ok: true, mode: 'connection-only' } };
       },
     }],
-  }).start();
+  });
 }
 
 // Rechaza la operación completa antes de delegar o persistir el valor.
@@ -421,6 +422,7 @@ export function createMcpStdioServer({ name, version, instructions, tools = [] }
 
   const normalizedTools = [];
   const toolMap = new Map();
+  let activeCalls = 0;
   for (const tool of Array.isArray(tools) ? tools : []) {
     if (!tool || typeof tool.name !== 'string' || !tool.name.trim() || typeof tool.handler !== 'function') {
       throw new Error('Cada herramienta MCP requiere `name` y `handler`.');
@@ -520,6 +522,8 @@ export function createMcpStdioServer({ name, version, instructions, tools = [] }
           return jsonRpcError(id, -32602, 'Invalid params: arguments must be an object');
         }
 
+        if (activeCalls >= MAX_IN_FLIGHT) return jsonRpcError(id, -32002, 'Servidor ocupado. Reintenta después.');
+        activeCalls++;
         try {
           // cwd solo sirve para dirigir la operación local. No se devuelve al cliente.
           const args = rawArgs ?? {};
@@ -559,6 +563,8 @@ export function createMcpStdioServer({ name, version, instructions, tools = [] }
               isError: true,
             },
           };
+        } finally {
+          activeCalls--;
         }
       }
 
@@ -567,89 +573,72 @@ export function createMcpStdioServer({ name, version, instructions, tools = [] }
     }
   }
 
-  function start(io = {}) {
+  async function start(io = {}) {
     const input = io.input ?? process.stdin;
     const output = io.output ?? process.stdout;
     const err = io.err ?? process.stderr;
-    const decoder = new StringDecoder('utf8');
     const inFlight = new Set();
-    let buffer = '';
+    const frame = Buffer.alloc(MAX_MESSAGE_BYTES);
+    let used = 0;
+    let discard = false;
+    let drain = null;
 
-    const writeResponse = payload => {
-      output.write(`${JSON.stringify(payload)}\n`);
-    };
-
-    const dispatchLine = rawLine => {
-      const trimmed = rawLine.replace(/\r$/, '').trim();
-      if (!trimmed) return;
-
-      let parsed;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        writeResponse(jsonRpcError(null, -32700, 'Parse error'));
+    function send(payload) {
+      if (payload && !output.write(JSON.stringify(payload) + '\n') && !drain) {
+        drain = once(output, 'drain').finally(() => { drain = null; });
+      }
+      return drain;
+    }
+    async function dispatch() {
+      const line = frame.toString('utf8', 0, used).trim();
+      used = 0;
+      if (!line) return;
+      let msg;
+      try { msg = JSON.parse(line); }
+      catch { await send(jsonRpcError(null, -32700, 'Parse error')); return; }
+      if (msg?.method !== 'tools/call' || !Object.hasOwn(msg, 'id')) {
+        await send(await handleMessage(msg));
         return;
       }
-
-      const task = Promise.resolve()
-        .then(() => handleMessage(parsed))
-        .then(response => {
-          if (response !== null && response !== undefined) {
-            writeResponse(response);
+      if (inFlight.size >= MAX_IN_FLIGHT) {
+        await send(jsonRpcError(isValidJsonRpcId(msg.id) ? msg.id : null, -32002, 'Servidor ocupado. Reintenta después.'));
+        return;
+      }
+      const pending = handleMessage(msg).then(send)
+        .catch(() => { err.write('Error en el transporte MCP.\n'); })
+        .finally(() => inFlight.delete(pending));
+      inFlight.add(pending);
+    }
+    try {
+      for await (const chunk of input) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        let pos = 0;
+        while (pos < bytes.length) {
+          const lf = bytes.indexOf(10, pos);
+          const end = lf === -1 ? bytes.length : lf;
+          if (!discard) {
+            if (end - pos > MAX_MESSAGE_BYTES - used) {
+              used = 0;
+              discard = true;
+              await send(jsonRpcError(null, -32001, 'Mensaje MCP demasiado grande.'));
+            } else {
+              bytes.copy(frame, used, pos, end);
+              used += end - pos;
+            }
           }
-        })
-        .catch(() => {
-          err.write(`[${name}] Error inesperado en stdio MCP.\n`);
-        })
-        .finally(() => {
-          inFlight.delete(task);
-        });
-      inFlight.add(task);
-    };
-
-    const onData = chunk => {
-      const text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
-      buffer += text;
-      let newlineIndex = buffer.indexOf('\n');
-      while (newlineIndex !== -1) {
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        dispatchLine(line);
-        newlineIndex = buffer.indexOf('\n');
-      }
-    };
-
-    return new Promise(resolveDone => {
-      let settled = false;
-      const finish = async () => {
-        if (settled) return;
-        settled = true;
-        buffer += decoder.end();
-        if (buffer.trim()) {
-          dispatchLine(buffer);
-          buffer = '';
+          if (lf === -1) break;
+          if (!discard) await dispatch();
+          discard = false;
+          pos = end + 1;
+          if (drain) await drain;
         }
-        if (inFlight.size > 0) {
-          await Promise.allSettled([...inFlight]);
-        }
-        resolveDone();
-      };
-
-      input.on('data', onData);
-      input.once('end', () => {
-        void finish();
-      });
-      input.once('close', () => {
-        void finish();
-      });
-      input.once('error', () => {
-        err.write(`[${name}] Error en el flujo de entrada.\n`);
-        void finish();
-      });
-      if (typeof input.resume === 'function') {
-        input.resume();
       }
-    });
+      if (!discard && used) await dispatch();
+    } catch {
+      err.write('Error en el transporte MCP.\n');
+    } finally {
+      await Promise.allSettled(inFlight);
+    }
   }
 
   return {

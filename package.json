@@ -9,6 +9,6 @@
     "node": ">=24.14.0"
   },
   "scripts": {
-    "test": "node --test antigravity-mcp.test.mjs claude-code-mcp.test.mjs codex-mcp.test.mjs privacy-mcp.test.mjs"
+    "test": "node --test antigravity-mcp.test.mjs claude-code-mcp.test.mjs codex-mcp.test.mjs privacy-mcp.test.mjs community-security.test.mjs"
   }
 }

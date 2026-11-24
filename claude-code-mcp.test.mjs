@@ -1,3 +1,4 @@
+import { testPolicy } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -44,6 +45,7 @@ test('claude-code-local MCP: initialize, tools/list, status, ask, review, list_s
   const calls = [];
 
   const server = createClaudeCodeMcpServer({
+    policy: testPolicy(w.cwd),
     executable: 'C:\\mock\\claude.exe',
     claudeHome: w.claudeHome,
     env: {
@@ -183,83 +185,13 @@ test('claude-code-local MCP: initialize, tools/list, status, ask, review, list_s
   assert.match(revCall.stdinText, /packages\/mcp-bridges/);
   assert.equal(revRes.result.structuredContent.ok, true);
 
-  // 7. claude_list_sessions: ordenado más reciente primero y sin seguir symlinks
-  const slug = resolve(w.cwd).replace(/[^a-zA-Z0-9]/g, '-');
-  const slugDir = join(w.claudeHome, 'projects', slug);
+  // Los archivos nativos preexistentes no acreditan procedencia ni se enumeran.
+  const slugDir = join(w.claudeHome, 'projects', resolve(w.cwd).replace(/[^a-zA-Z0-9]/g, '-'));
   mkdirSync(slugDir, { recursive: true });
-  const oldSess = join(slugDir, '11111111-1111-4111-8111-111111111111.jsonl');
-  const newSess = join(slugDir, '22222222-2222-4222-8222-222222222222.jsonl');
-  writeFileSync(oldSess, '{"a":1}\n', 'utf8');
-  writeFileSync(newSess, '{"b":2}\n', 'utf8');
-  const tOld = new Date('2026-11-20T10:00:00Z');
-  const tNew = new Date('2026-11-23T10:00:00Z');
-  utimesSync(oldSess, tOld, tOld);
-  utimesSync(newSess, tNew, tNew);
-
-  const outsideLog = join(w.outside, 'secret.jsonl');
-  writeFileSync(outsideLog, '{"secret":true}\n', 'utf8');
-  const linkedLog = join(slugDir, '33333333-3333-4333-8333-333333333333.jsonl');
-  let fileSymCreated = true;
-  try {
-    symlinkSync(outsideLog, linkedLog, 'file');
-  } catch {
-    fileSymCreated = false;
-  }
-
-  const listSessRes = await server.handleMessage({
-    jsonrpc: '2.0',
-    id: 7,
-    method: 'tools/call',
-    params: { name: 'claude_list_sessions', arguments: { cwd: w.cwd } },
-  });
-  assert.equal(listSessRes.result.structuredContent.ok, true);
-  assert.deepEqual(
-    listSessRes.result.structuredContent.sessions.map(s => s.sessionId),
-    [
-      '22222222-2222-4222-8222-222222222222',
-      '11111111-1111-4111-8111-111111111111',
-    ],
-  );
-  assert.match(listSessRes.result.content[0].text, /- 22222222-2222-4222-8222-222222222222 · .* B/);
-  assert.match(listSessRes.result.content[0].text, /- 11111111-1111-4111-8111-111111111111 · .* B/);
-  if (fileSymCreated) {
-    assert.equal(listSessRes.result.structuredContent.skippedSymlinks, 1);
-  }
-
-  // Symlink / junction como carpeta del slug debe rechazarse.
-  const linkedCwd = join(w.base, 'linked-cwd');
-  let dirSymCreated = true;
-  try {
-    symlinkSync(w.cwd, linkedCwd, 'junction');
-  } catch {
-    dirSymCreated = false;
-  }
-  if (dirSymCreated) {
-    const badCwdCall = await server.handleMessage({
-      jsonrpc: '2.0',
-      id: 8,
-      method: 'tools/call',
-      params: { name: 'claude_ask', arguments: { cwd: linkedCwd, prompt: 'hola' } },
-    });
-    assert.equal(badCwdCall.result.isError, true);
-
-    const linkedSlug = resolve(w.outside).replace(/[^a-zA-Z0-9]/g, '-');
-    const linkedSlugDir = join(w.claudeHome, 'projects', linkedSlug);
-    try {
-      symlinkSync(slugDir, linkedSlugDir, 'junction');
-      const badSlugList = await server.handleMessage({
-        jsonrpc: '2.0',
-        id: 9,
-        method: 'tools/call',
-        params: { name: 'claude_list_sessions', arguments: { cwd: w.outside } },
-      });
-      assert.equal(badSlugList.result.isError, true);
-      rmSync(linkedSlugDir, { recursive: false, force: true });
-    } catch {
-      /* Ignore if junction creation is restricted. */
-    }
-    rmSync(linkedCwd, { recursive: false, force: true });
-  }
+  writeFileSync(join(slugDir, '22222222-2222-4222-8222-222222222222.jsonl'), '{}');
+  const sessions = await call(server, 'claude_list_sessions', { cwd: w.cwd });
+  assert.deepEqual(sessions.result.structuredContent.sessions.map(s => s.sessionId), ['11111111-1111-4111-8111-111111111111']);
+  assert.ok((await call(server, 'claude_list_sessions', { cwd: w.outside })).result.isError);
 
   // 8. cwd inválido (relativo o inexistente) devuelve isError: true sin derribar el servidor.
   const relCwdRes = await server.handleMessage({
@@ -276,7 +208,7 @@ test('claude-code-local MCP responde por stdio JSON-RPC real como proceso hijo',
   const repoRoot = dirname(fileURLToPath(import.meta.url));
   const serverPath = join(repoRoot, 'claude-code-mcp-server.mjs');
 
-  const child = spawn(process.execPath, [serverPath, '--allow-project-data'], {
+  const child = spawn(process.execPath, [serverPath, '--allow-project-data', '--project-root', w.cwd], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -367,6 +299,7 @@ test('Claude limita herramientas y aísla ajustes del proyecto y MCP en lectura 
   const w = makeWorkspace(t);
   const runs = [];
   const server = createClaudeCodeMcpServer({
+    policy: testPolicy(w.cwd),
     executable: 'claude.exe',
     runProcess: async params => {
       runs.push(params);
@@ -404,6 +337,7 @@ test('Claude comprueba la suscripción y sanea proveedor, cuenta y destino antes
     CLOUD_ML_REGION: 'region', VERTEX_REGION_CLAUDE_TEST: 'region', KEEP: 'sí',
   };
   const server = createClaudeCodeMcpServer({
+    policy: testPolicy(w.cwd),
     executable: 'claude.exe', env,
     runProcess: async params => {
       assert.deepEqual(params.env, {});
@@ -416,7 +350,7 @@ test('Claude comprueba la suscripción y sanea proveedor, cuenta y destino antes
   for (const account of [auth, { loggedIn: false, authMethod: 'claude.ai' }, {}, { loggedIn: true, authMethod: null }]) {
     auth = account;
     for (const name of ['claude_ask', 'claude_review']) {
-      const result = await call(server, name, { cwd: w.cwd, prompt: 'Consulta', model: 'sonnet' });
+      const result = await call(server, name, { cwd: w.cwd, ...(name === 'claude_ask' ? { prompt: 'Consulta' } : {}), model: 'sonnet' });
       assert.equal(result.result.isError, true);
       assert.match(result.result.content[0].text, /suscripción claude\.ai/);
     }
@@ -426,7 +360,7 @@ test('Claude comprueba la suscripción y sanea proveedor, cuenta y destino antes
   assert.equal((await call(server, 'claude_ask', { cwd: w.cwd, prompt: 'Consulta' })).result.structuredContent.ok, true);
   assert.equal(executions, 1);
   const statusWithKey = (await call(server, 'claude_status', {})).result;
-  const noKeyServer = createClaudeCodeMcpServer({ executable: 'claude.exe', env: {}, runProcess: async p =>
+  const noKeyServer = createClaudeCodeMcpServer({ policy: testPolicy(w.cwd), executable: 'claude.exe', env: {}, runProcess: async p =>
     p.args.includes('auth') ? { exitCode: 0, stdout: JSON.stringify(auth) } : { exitCode: 0, stdout: '2.1.322' } });
   assert.deepEqual(statusWithKey, (await call(noKeyServer, 'claude_status', {})).result);
 });
@@ -434,7 +368,7 @@ test('Claude comprueba la suscripción y sanea proveedor, cuenta y destino antes
 test('Claude rechaza opciones que parecen flags, UUID inválidos, tipos y ejecutables de shell', async t => {
   const w = makeWorkspace(t);
   let invoked = 0;
-  const server = createClaudeCodeMcpServer({ executable: 'claude.exe', runProcess: async () => { invoked++; } });
+  const server = createClaudeCodeMcpServer({ policy: testPolicy(w.cwd), executable: 'claude.exe', runProcess: async () => { invoked++; } });
   for (const extra of [
     { model: '-p' }, { model: 'un-modelo-arbitrario' }, { sessionId: '--help' },
     { sessionId: 'sesion-invalida' }, { timeoutSec: '5' }, { timeoutSec: 5.5 }, { maxTurns: '2' },
@@ -444,7 +378,7 @@ test('Claude rechaza opciones que parecen flags, UUID inválidos, tipos y ejecut
   const script = join(w.base, 'claude.CMD');
   writeFileSync(script, 'rem stub');
   assert.equal(resolveExecutable('', [script], []), null);
-  const scriptServer = createClaudeCodeMcpServer({ executable: script, runProcess: async () => { invoked++; } });
+  const scriptServer = createClaudeCodeMcpServer({ policy: testPolicy(w.cwd), executable: script, runProcess: async () => { invoked++; } });
   assert.equal((await call(scriptServer, 'claude_ask', { cwd: w.cwd, prompt: 'Hola' })).result.isError, true);
   assert.equal(invoked, 0);
 });
@@ -454,6 +388,7 @@ test('Claude conserva el cerrojo de edit y rechaza otro escritor con los PID aú
   const lockDir = join(base, 'locks');
   let writes = 0;
   const server = createClaudeCodeMcpServer({
+    policy: testPolicy(cwd),
     executable: 'claude.exe', lockDir,
     runProcess: async ({ args, onSpawn }) => {
       if (args.includes('auth')) return { exitCode: 0, stdout: '{"loggedIn":true,"authMethod":"claude.ai"}' };
@@ -512,14 +447,14 @@ test('Claude corta la salida y resuelve el tiempo de espera aunque el hijo no ci
   appendBoundedOutput(multibyte, 'abc😀', 5);
   assert.equal(multibyte.text, 'abc');
   assert.equal(multibyte.truncated, true);
-  const server = createClaudeCodeMcpServer({ executable: 'claude.exe', runProcess: async params =>
+  const server = createClaudeCodeMcpServer({ policy: testPolicy(w.cwd), executable: 'claude.exe', runProcess: async params =>
     params.args.includes('auth') ? { exitCode: 0, stdout: '{"loggedIn":true,"authMethod":"claude.ai"}' } :
       { exitCode: 0, stdout: '{"result":"aparentemente correcto"}', truncated: true, durationMs: 1 } });
   const result = await call(server, 'claude_ask', { cwd: w.cwd, prompt: 'Consulta' });
   assert.equal(result.result.isError, true);
   assert.equal(result.result.structuredContent.ok, false);
   assert.match(result.result.content[0].text, /truncada/);
-  const timedOutServer = createClaudeCodeMcpServer({ executable: 'claude.exe', runProcess: async params =>
+  const timedOutServer = createClaudeCodeMcpServer({ policy: testPolicy(w.cwd), executable: 'claude.exe', runProcess: async params =>
     params.args.includes('auth') ? { exitCode: 0, stdout: '{"loggedIn":true,"authMethod":"claude.ai"}' } :
       { exitCode: 124, stdout: '{"result":"parcial"}', timedOut: true, treeTerminated: false, durationMs: 1 } });
   const timeoutResult = await call(timedOutServer, 'claude_ask', { cwd: w.cwd, prompt: 'Consulta' });

@@ -1,3 +1,4 @@
+import { testPolicy } from './test-policy.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
@@ -39,6 +40,7 @@ test('codex-local MCP: initialize, ping, tools/list, codex_status y codex_models
     let execCalled = 0;
 
     const server = createCodexMcpServer({
+      policy: testPolicy(workDir),
       executable: process.execPath,
       defaultCwd: workDir,
       baseEnv: {
@@ -147,6 +149,7 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
     let observedTmpOutPath = null;
 
     const server = createCodexMcpServer({
+      policy: testPolicy(workDir),
       executable: 'C:\\Stub\\codex.exe',
       defaultCwd: workDir,
       baseEnv: {
@@ -188,7 +191,7 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
         }
 
         const isResume = call.args.includes('resume');
-        const threadId = isResume ? 'sess-uuid-123' : 'sess-uuid-123';
+        const threadId = isResume ? '12345678-1111-4111-8111-123456789abc' : '12345678-1111-4111-8111-123456789abc';
         const answer = isResume ? 'RESUMED_OK' : 'READONLY_OK';
         return {
           exitCode: 0,
@@ -219,11 +222,11 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
       },
     });
     assert.equal(ask1.result.structuredContent.ok, true);
-    assert.equal(ask1.result.structuredContent.sessionId, 'sess-uuid-123');
+    assert.equal(ask1.result.structuredContent.sessionId, '12345678-1111-4111-8111-123456789abc');
     assert.equal(ask1.result.structuredContent.model, 'gpt-6.1-terra');
     assert.equal(ask1.result.structuredContent.sandbox, 'read-only');
     assert.equal(ask1.result.structuredContent.answer, 'READONLY_OK');
-    assert.match(ask1.result.content[0].text, /^READONLY_OK\n\n\[codex-local · model=gpt-6\.1-terra · sessionId=sess-uuid-123\]$/);
+    assert.match(ask1.result.content[0].text, /^READONLY_OK\n\n\[codex-local · model=gpt-6\.1-terra · sessionId=12345678-1111-4111-8111-123456789abc\]$/);
     assert.equal(ask1.result.structuredContent.exitCode, 0);
     assert.equal(existsSync(observedTmpOutPath), false, 'Debe limpiar archivo temporal -o en finally');
     assert.deepEqual(calls[0].args.slice(0, 7), ['exec', '-C', workDir, '-s', 'read-only', '-m', 'gpt-6.1-terra']);
@@ -242,13 +245,13 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
           cwd: workDir,
           prompt: 'Continua el analisis previo.',
           sandbox: 'workspace-write',
-          sessionId: 'sess-uuid-123',
+          sessionId: '12345678-1111-4111-8111-123456789abc',
           model: 'gpt-6.1-sol',
         },
       },
     });
     assert.equal(ask2.result.structuredContent.ok, true);
-    assert.equal(ask2.result.structuredContent.sessionId, 'sess-uuid-123');
+    assert.equal(ask2.result.structuredContent.sessionId, '12345678-1111-4111-8111-123456789abc');
     assert.equal(ask2.result.structuredContent.model, 'gpt-6.1-sol');
     assert.equal(ask2.result.structuredContent.sandbox, 'workspace-write');
     assert.equal(ask2.result.structuredContent.answer, 'RESUMED_OK');
@@ -262,7 +265,7 @@ test('codex-local MCP: codex_ask (read-only, resume, stdin, sin OPENAI_API_KEY) 
       '-m',
       'gpt-6.1-sol',
     ]);
-    assert.equal(calls[1].args.at(-2), 'sess-uuid-123');
+    assert.equal(calls[1].args.at(-2), '12345678-1111-4111-8111-123456789abc');
     assert.equal(calls[1].args.at(-1), '-');
     assert.ok(!calls[1].args.includes('--ignore-user-config'));
 
@@ -317,6 +320,7 @@ test('codex-local MCP: rechaza cwd invalido, UNC, symlink/junction, sandbox no p
     junctions.push(linkedDir);
 
     const server = createCodexMcpServer({
+      policy: testPolicy(realDir),
       executable: 'C:\\Stub\\codex.exe',
       defaultCwd: realDir,
       probeCodex: async () => ({
@@ -464,7 +468,7 @@ test('Codex verifica ChatGPT con modelo explícito y limpia variables de cuenta 
   let account = { type: 'apiKey' };
   let executions = 0;
   let resolutions = 0;
-  const server = createCodexMcpServer({ resolveCodex: () => { resolutions++; return 'codex.exe'; }, baseEnv: env,
+  const server = createCodexMcpServer({ policy: testPolicy(cwd), resolveCodex: () => { resolutions++; return 'codex.exe'; }, baseEnv: env,
     probeCodex: async (_exe, clean) => {
       assert.deepEqual(clean, { Path: 'ruta-de-prueba' });
       if (account?.type === 'chatgpt') env.Path = 'modificado después de la sonda';
@@ -502,7 +506,7 @@ test('Codex rechaza tipos inválidos y .cmd/.bat antes de llamar al ejecutable',
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cwd = join(root, 'repo'); mkdirSync(cwd);
   let probes = 0;
-  const server = createCodexMcpServer({ executable: 'codex.exe', probeCodex: async () => { probes++; } });
+  const server = createCodexMcpServer({ policy: testPolicy(cwd), executable: 'codex.exe', probeCodex: async () => { probes++; } });
   for (const [name, extra] of [
     ['codex_ask', { ephemeral: 'false' }], ['codex_ask', { ephemeral: 1 }],
     ['codex_ask', { timeoutSec: '5' }], ['codex_review', { uncommitted: 'false' }],
@@ -512,7 +516,7 @@ test('Codex rechaza tipos inválidos y .cmd/.bat antes de llamar al ejecutable',
   }
   const script = join(root, 'codex.BAT'); writeFileSync(script, 'rem stub');
   assert.equal(resolveExecutable('', [script], []), null);
-  const bad = createCodexMcpServer({ executable: script, probeCodex: async () => { probes++; } });
+  const bad = createCodexMcpServer({ policy: testPolicy(cwd), executable: script, probeCodex: async () => { probes++; } });
   assert.equal((await call(bad, 'codex_ask', { cwd, prompt: 'Consulta' })).result.isError, true);
   assert.equal(probes, 0);
 });
@@ -531,7 +535,7 @@ test('ambos puentes comparten cerrojos, permiten lectura y recuperan un propieta
   let entered = new Promise(resolveEntered => { enter = resolveEntered; });
   let gate = new Promise(resolveGate => { release = resolveGate; });
   let heldBy = 'codex';
-  const codex = createCodexMcpServer({ executable: 'codex.exe', lockDir,
+  const codex = createCodexMcpServer({ policy: testPolicy(cwd), executable: 'codex.exe', lockDir,
     probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
     runCodexExec: async params => {
       if (params.args.includes('workspace-write')) params.onSpawn(process.pid);
@@ -539,7 +543,7 @@ test('ambos puentes comparten cerrojos, permiten lectura y recuperan un propieta
       return { exitCode: 0, stdout: '', stderr: '', outputFileText: 'listo' };
     },
   });
-  const claude = createClaudeCodeMcpServer({ executable: 'claude.exe', lockDir,
+  const claude = createClaudeCodeMcpServer({ policy: testPolicy(cwd), executable: 'claude.exe', lockDir,
     runProcess: async params => {
       if (params.args.includes('auth')) return { exitCode: 0, stdout: '{"loggedIn":true,"authMethod":"claude.ai"}' };
       if (heldBy === 'claude' && params.args.includes('acceptEdits')) { enter(); await gate; }
@@ -583,14 +587,14 @@ test('ambos puentes comparten cerrojos, permiten lectura y recuperan un propieta
   assert.equal((await call(codex, 'codex_ask', { cwd, prompt: 'Editar', sandbox: 'workspace-write' })).result.isError, true);
   assert.equal(readFileSync(join(lockDir, lockName), 'utf8'), 'cerrojo incompleto');
   rmSync(join(lockDir, lockName));
-  const invalidLockDir = createCodexMcpServer({ executable: 'codex.exe', lockDir: join(cwd, 'locks'),
+  const invalidLockDir = createCodexMcpServer({ policy: testPolicy(cwd), executable: 'codex.exe', lockDir: join(cwd, 'locks'),
     probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
     runCodexExec: async () => { throw new Error('No debe escribir dentro del repositorio'); },
   });
   assert.equal((await call(invalidLockDir, 'codex_ask', { cwd, prompt: 'Editar', sandbox: 'workspace-write' })).result.isError, true);
   assert.equal(existsSync(join(cwd, 'locks')), false);
 
-  const fails = createCodexMcpServer({ executable: 'codex.exe', lockDir,
+  const fails = createCodexMcpServer({ policy: testPolicy(cwd), executable: 'codex.exe', lockDir,
     probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
     runCodexExec: async () => { throw new Error('fallo simulado'); },
   });
@@ -603,6 +607,7 @@ test('Codex conserva el cerrojo tras un timeout sin terminación confirmada aunq
   let treeTerminated = true;
   let writes = 0;
   const server = createCodexMcpServer({
+    policy: testPolicy(cwd),
     executable: 'codex.exe', lockDir,
     probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
     runCodexExec: async ({ onSpawn }) => {
@@ -725,7 +730,7 @@ test('el cerrojo es exclusivo también entre procesos distintos', async t => {
   t.after(() => { try { child.kill(); } catch { /* ya terminó */ } });
   child.stderr.resume();
   assert.match((await once(child.stdout, 'data'))[0].toString(), /tomado/);
-  const server = createCodexMcpServer({ executable: 'codex.exe', lockDir,
+  const server = createCodexMcpServer({ policy: testPolicy(cwd), executable: 'codex.exe', lockDir,
     probeCodex: async () => ({ account: { type: 'chatgpt' }, modelList: {} }),
     runCodexExec: async () => ({ exitCode: 0, stdout: '', stderr: '', outputFileText: 'listo' }),
   });

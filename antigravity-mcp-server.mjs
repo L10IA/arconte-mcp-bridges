@@ -1,19 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { defaultRunProcess } from './claude-code-mcp-server.mjs';
 import {
   assertNativeExecutable,
   assertPlainCwd,
-  createMcpStdioServer,
+  connectionServer,
   resolveExecutable,
   BridgeError,
   buildCliEnv,
-  startBridge,
   withCwdWriteLock,
 } from './mcp-stdio.mjs';
+import { projectServer, startBridge } from './bridge-policy.mjs';
 
 const DEFAULT_TIMEOUT_SEC = 240;
 const MAX_TIMEOUT_SEC = 600;
@@ -143,20 +143,16 @@ function slugify(value) {
   return slug;
 }
 
-function createMailbox(root) {
-  function plainRoot() {
-    if (typeof root !== 'string' || !isAbsolute(root)) {
-      throw new BridgeError('La carpeta del buzón debe ser una ruta absoluta.');
-    }
-    return assertPlainCwd(root);
-  }
-
+function createMailbox(policy) {
+  const identity = policy.mailboxAs;
+  const archiveFolder = agent => `archivo-${agent}`;
   function folderPath(folder, { create = false } = {}) {
-    const base = plainRoot();
+    const base = policy.mailboxRoot(create);
+    if (!base) return null;
     const path = join(base, folder);
     if (!existsSync(path)) {
       if (!create) return null;
-      try { mkdirSync(path); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+      try { mkdirSync(path, { mode: 0o700 }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
     }
     const stat = lstatSync(path);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -166,11 +162,9 @@ function createMailbox(root) {
   }
 
   function folderFor(box, { allowArchive = false } = {}) {
-    if (allowArchive && box === ARCHIVE_FOLDER) return ARCHIVE_FOLDER;
-    if (typeof box !== 'string' || !Object.hasOwn(AGENT_FOLDERS, box)) {
-      throw new BridgeError(`buzon inválido; usa ${AGENTS.join(', ')}${allowArchive ? ` o ${ARCHIVE_FOLDER}` : ''}.`);
-    }
-    return AGENT_FOLDERS[box];
+    if (allowArchive && box === ARCHIVE_FOLDER) return archiveFolder(identity);
+    if (box !== identity) throw new BridgeError('Esta instancia solo tiene acceso a su propia bandeja.');
+    return AGENT_FOLDERS[identity];
   }
 
   function messageName(id) {
@@ -190,7 +184,7 @@ function createMailbox(root) {
       if (error?.code === 'ENOENT') throw new BridgeError('El mensaje no existe en ese buzón.');
       throw error;
     }
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new BridgeError('El mensaje no es un archivo regular.');
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) throw new BridgeError('El mensaje no es un archivo regular.');
     return stat;
   }
 
@@ -204,7 +198,7 @@ function createMailbox(root) {
         if (name.length > 120 || !MESSAGE_NAME.test(name)) continue;
         let stat;
         try { stat = lstatSync(join(path, name)); } catch { continue; }
-        if (stat.isSymbolicLink() || !stat.isFile()) continue;
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) continue;
         all.push({ id: name.slice(0, -3), modificado: new Date(stat.mtimeMs).toISOString(), bytes: stat.size });
       }
       all.sort((a, b) => b.id.localeCompare(a.id));
@@ -236,7 +230,8 @@ function createMailbox(root) {
       }
     },
 
-    send({ de, para, tipo, asunto, cuerpo, worktree, archivos, respondeA }, now) {
+    send({ de = identity, para, tipo, asunto, cuerpo, worktree, archivos, respondeA }, now) {
+      if (de !== identity) throw new BridgeError('El remitente no coincide con la identidad de esta instancia.');
       if (!AGENTS.includes(de) || !AGENTS.includes(para) || de === para) {
         throw new BridgeError(`de y para deben ser dos agentes distintos entre ${AGENTS.join(', ')}.`);
       }
@@ -265,7 +260,7 @@ function createMailbox(root) {
       }
       const duplicate = () => new BridgeError('Ya existe un mensaje con ese id; cambia el asunto o espera un minuto.');
       // El id debe ser único en todo el buzón: dos mensajes con el mismo id no podrían archivarse.
-      for (const other of [...Object.values(AGENT_FOLDERS), ARCHIVE_FOLDER]) {
+      for (const other of [...Object.values(AGENT_FOLDERS), ...AGENTS.map(archiveFolder)]) {
         const existing = folderPath(other);
         if (existing && existsSync(join(existing, `${id}.md`))) throw duplicate();
       }
@@ -290,7 +285,7 @@ function createMailbox(root) {
       if (!source) throw new BridgeError('El mensaje no existe en ese buzón.');
       const name = messageName(id);
       plainFile(join(source, name));
-      const target = join(folderPath(ARCHIVE_FOLDER, { create: true }), name);
+      const target = join(folderPath(archiveFolder(identity), { create: true }), name);
       try {
         // Copia exclusiva: si otro proceso archivó antes ese id, falla sin tocar ninguno de los dos mensajes.
         copyFileSync(join(source, name), target, constants.COPYFILE_EXCL);
@@ -304,36 +299,15 @@ function createMailbox(root) {
   };
 }
 
-function listCliConversations(directory, limit) {
-  if (!existsSync(directory)) return { conversaciones: [], total: 0 };
-  const dirStat = lstatSync(directory);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-    throw new BridgeError('El almacén de conversaciones de Antigravity CLI no es un directorio real.');
-  }
-  const all = [];
-  for (const name of readdirSync(directory)) {
-    if (!name.endsWith('.db') || !UUID.test(name.slice(0, -3))) continue;
-    let stat;
-    try { stat = lstatSync(join(directory, name)); } catch { continue; }
-    if (stat.isSymbolicLink() || !stat.isFile()) continue;
-    all.push({ conversationId: name.slice(0, -3), modificado: new Date(stat.mtimeMs).toISOString(), bytes: stat.size, mtimeMs: stat.mtimeMs });
-  }
-  all.sort((a, b) => b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId));
-  return {
-    conversaciones: all.slice(0, limit).map(({ conversationId, modificado, bytes }) => ({ conversationId, modificado, bytes })),
-    total: all.length,
-  };
-}
 
 export function createAntigravityMcpServer(options = {}) {
+  const { policy } = options;
+  if (!policy) return connectionServer('antigravity-local');
   const baseEnv = options.env ?? process.env;
   const homeDirectory = options.homeDir ?? homedir();
   const localAppData = asNonEmptyString(baseEnv.LOCALAPPDATA) ?? join(homeDirectory, 'AppData', 'Local');
-  const mailbox = createMailbox(
-    options.buzonDir ?? asNonEmptyString(baseEnv.ARCONTE_BUZON_DIR) ?? join(localAppData, 'ARCONTE', 'diagnostics', 'buzon'),
-  );
-  const conversationsDir = options.conversationsDir ?? join(homeDirectory, '.gemini', 'antigravity-cli', 'conversations');
-  const probeCwd = options.probeCwd ?? tmpdir();
+  const mailbox = createMailbox(policy);
+  const probeCwd = policy.root;
   const now = options.now ?? (() => new Date());
   const resolveBinary =
     options.resolveExecutable ??
@@ -485,7 +459,7 @@ export function createAntigravityMcpServer(options = {}) {
           mode: { type: 'string', enum: ['plan', 'accept-edits'], default: 'plan' },
           timeoutSec: { type: 'integer', minimum: 5, maximum: MAX_TIMEOUT_SEC, default: DEFAULT_TIMEOUT_SEC },
         },
-        required: ['cwd', 'prompt'],
+        required: ['prompt'],
         additionalProperties: false,
       },
       handler: async rawArgs => {
@@ -510,12 +484,11 @@ export function createAntigravityMcpServer(options = {}) {
         additionalProperties: false,
       },
       handler: async rawArgs => {
-        const listing = listCliConversations(conversationsDir, parseLimit(asObject(rawArgs).limit));
+        const listing = policy.sessions('antigravity', parseLimit(asObject(rawArgs).limit));
+        const conversaciones = listing.entries.map(s => ({ conversationId: s.id, createdAt: s.createdAt }));
         return {
-          text: listing.conversaciones.length > 0
-            ? listing.conversaciones.map(c => `- ${c.conversationId} · ${c.modificado} · ${c.bytes} B`).join('\n')
-            : 'No hay conversaciones locales de la CLI de Antigravity.',
-          structuredContent: { ok: true, ...listing },
+          text: conversaciones.map(c => c.conversationId).join('\n') || 'No hay conversaciones verificadas para este proyecto.',
+          structuredContent: { ok: true, conversaciones, total: listing.total },
         };
       },
     },
@@ -576,7 +549,7 @@ export function createAntigravityMcpServer(options = {}) {
           archivos: { type: 'string', description: 'Archivos asignados o tocados, en una línea.' },
           responde_a: { type: 'string', description: 'id del mensaje al que responde o "ninguno".' },
         },
-        required: ['de', 'para', 'tipo', 'asunto', 'cuerpo'],
+        required: ['para', 'tipo', 'asunto', 'cuerpo'],
         additionalProperties: false,
       },
       handler: async rawArgs => {
@@ -609,7 +582,7 @@ export function createAntigravityMcpServer(options = {}) {
     },
   ];
 
-  return createMcpStdioServer({
+  return projectServer(policy, {
     name: 'antigravity-local',
     version: '0.1.0',
     instructions:
