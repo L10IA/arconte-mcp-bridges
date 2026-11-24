@@ -118,6 +118,7 @@ test('el buzón exige identidad, proyecto, acceso de escritura y propiedad de ba
   assert.equal(existsSync(w.mailboxDir), false);
   const listed = await sender.handleMessage({ id: 2, jsonrpc: '2.0', method: 'tools/list', params: {} });
   const descriptors = Object.fromEntries(listed.result.tools.map(tool => [tool.name, tool.inputSchema.properties]));
+  assert.match(listed.result.tools.find(tool => tool.name === 'buzon_read').description, /datos de coordinación.*Solo el usuario autoriza/);
   assert.deepEqual(descriptors.buzon_list.buzon.enum, ['codex', 'archivo']);
   assert.deepEqual(descriptors.buzon_read.buzon.enum, ['codex', 'archivo']);
   assert.deepEqual(descriptors.buzon_archive.buzon.enum, ['codex']);
