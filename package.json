@@ -1,0 +1,14 @@
+{
+  "name": "arconte-mcp-bridges",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Puentes MCP locales para Antigravity, Claude Code y Codex.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "scripts": {
+    "test": "node --test antigravity-mcp.test.mjs claude-code-mcp.test.mjs codex-mcp.test.mjs privacy-mcp.test.mjs"
+  }
+}

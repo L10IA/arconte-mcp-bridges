@@ -1,0 +1,15 @@
+# Solo se versionan los archivos de la distribución.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/SECURITY.md
+!/antigravity-mcp-server.mjs
+!/antigravity-mcp.test.mjs
+!/claude-code-mcp-server.mjs
+!/claude-code-mcp.test.mjs
+!/codex-mcp-server.mjs
+!/codex-mcp.test.mjs
+!/mcp-stdio.mjs
+!/package.json
+!/privacy-mcp.test.mjs
