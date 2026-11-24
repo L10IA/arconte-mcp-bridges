@@ -132,17 +132,10 @@ export function parseClaudeJsonResult(
                 rawParsed.at(-1),
             )
           : asObject(rawParsed);
-        if (Object.keys(parsed).length === 0) continue;
+        if (Object.keys(parsed).length === 0 || (parsed.type !== undefined && parsed.type !== 'result')) continue;
         const rawId = parsed.session_id ?? parsed.sessionId;
         const sessionId = typeof rawId === 'string' && SESSION_ID.test(rawId) ? rawId : fallbackSessionId;
-        const resultText =
-          typeof parsed.result === 'string'
-            ? parsed.result.trim()
-            : typeof parsed.message === 'string'
-              ? parsed.message.trim()
-              : typeof asObject(parsed.content).text === 'string'
-                ? asObject(parsed.content).text.trim()
-                : '';
+        const resultText = typeof parsed.result === 'string' ? parsed.result.trim() : '';
         const hasErrorsArray = Array.isArray(parsed.errors) && parsed.errors.length > 0;
         const isError = parsed.is_error === true || hasErrorsArray || exitCode !== 0 || !resultText;
         const numTurns =

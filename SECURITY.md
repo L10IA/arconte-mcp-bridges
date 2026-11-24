@@ -10,6 +10,8 @@ Los puentes bloquean patrones reconocibles de claves, cabeceras de autorización
 
 ## Qué queda en el equipo
 
+En delegación, el cliente elige cualquier carpeta local válida. Los servidores no vinculan las sesiones reanudadas con el proyecto que las creó. Un cliente que conoce un identificador puede solicitar contexto de otro proyecto del mismo usuario. Reserva este modo para clientes, proyectos, agentes y configuraciones de confianza. En sistemas POSIX, un escritor que agote el tiempo conserva su cerrojo hasta que un operador compruebe que terminaron todos los procesos.
+
 - Los servidores hablan JSON-RPC por entrada y salida estándar. Las aplicaciones cliente y las CLI pueden conservar su propio historial.
 - Las CLI usan sus credenciales locales. El puente les entrega solo ciertas variables del sistema, como el perfil y el directorio temporal. Las respuestas de estado omiten la ruta del ejecutable, el plan y los datos de cuenta. Los errores del proveedor y sus registros de diagnóstico se mantienen fuera de las respuestas MCP.
 - En delegación, `cwd` es una ruta local necesaria para seleccionar el proyecto. Codex y Claude reciben el encargo por entrada estándar. Antigravity lo recibe como argumento del proceso, visible para usuarios con permisos para inspeccionarlo.

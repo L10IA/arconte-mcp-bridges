@@ -6,12 +6,32 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createAntigravityMcpServer } from './antigravity-mcp-server.mjs';
-import { createClaudeCodeMcpServer } from './claude-code-mcp-server.mjs';
+import { createClaudeCodeMcpServer, parseClaudeJsonResult } from './claude-code-mcp-server.mjs';
 import { createCodexMcpServer } from './codex-mcp-server.mjs';
-import { buildCliEnv } from './mcp-stdio.mjs';
+import { BridgeError, buildCliEnv, createMcpStdioServer, terminateProcessTree } from './mcp-stdio.mjs';
 
 const request = (id, method, params = {}) => ({ jsonrpc: '2.0', id, method, params });
 const call = (server, name, args) => server.handleMessage(request(1, 'tools/call', { name, arguments: args }));
+
+test('un error con ruta privada y un diagnóstico JSON de la CLI quedan fuera de la respuesta', async () => {
+  const server = createMcpStdioServer({ name: 'prueba', version: '1', tools: [
+    { name: 'prueba', handler() { throw new BridgeError('detalle /home/usuario-ficticio/privado'); } },
+  ] });
+  const reply = await call(server, 'prueba', {});
+  assert.ok(reply.result.isError);
+  assert.ok(!JSON.stringify(reply).includes('usuario-ficticio'));
+  const diagnostic = JSON.stringify({ type: 'system', message: 'diagnóstico reservado de prueba' });
+  const result = parseClaudeJsonResult(diagnostic, '', 0, { mode: 'read-only' });
+  assert.ok(result.isError);
+  assert.ok(!JSON.stringify(result).includes('reservado'));
+});
+
+test('una señal al hijo en POSIX no confirma la terminación de todos los descendientes', async () => {
+  let signalled = false;
+  const child = { pid: 42, kill() { signalled = true; } };
+  assert.equal(await terminateProcessTree(child, { platform: 'linux' }), false);
+  assert.ok(signalled);
+});
 
 test('cada punto de entrada ofrece solo una comprobación local por defecto y ante opciones desconocidas', () => {
   for (const provider of ['codex', 'claude-code', 'antigravity']) {

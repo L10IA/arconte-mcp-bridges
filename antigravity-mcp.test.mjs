@@ -221,7 +221,7 @@ test('Antigravity conserva el cerrojo de accept-edits y bloquea el reintento tra
   const retry = await write();
   assert.equal(retry.result.isError, true);
   assert.match(retry.result.content[0].text, /escritor previo.*terminación del árbol.*limpieza manual/i);
-  assert.ok(retry.result.content[0].text.includes(path));
+  assert.ok(!retry.result.content[0].text.includes(path), 'el error no debe exponer la ruta privada');
 
   // Un subdirectorio dentro del mismo worktree (.git) comparte exactamente el mismo cerrojo.
   const dirs2 = sandbox(t);

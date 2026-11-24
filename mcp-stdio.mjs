@@ -113,7 +113,7 @@ export async function withCwdWriteLock(cwd, server, action, lockDir = join(tmpdi
   const recoveryPath = `${path}.recovery`;
   const owner = { pid: process.pid, servidor: server, hora: new Date().toISOString(), token: randomUUID() };
   const occupied = record => record?.unterminatedTree === true
-    ? new BridgeError(`Un escritor previo agotó el tiempo sin confirmar la terminación del árbol de procesos. Se requiere revisión y limpieza manual del cerrojo (${path}) antes de continuar.`)
+    ? new BridgeError('Un escritor previo agotó el tiempo sin confirmar la terminación del árbol de procesos. Se requiere revisión y limpieza manual del cerrojo antes de continuar.')
     : new BridgeError('El cwd ya tiene un escritor activo o un cerrojo que no puede verificarse.');
 
   function createLock() {
@@ -230,7 +230,8 @@ export async function terminateProcessTree(child, {
   systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows',
   timeoutMs = 5000,
 } = {}) {
-  let treeTerminated = platform !== 'win32';
+  // Una señal al proceso principal no confirma que sus descendientes hayan terminado.
+  let treeTerminated = false;
   if (platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
     treeTerminated = await new Promise(done => {
       let finished = false;
@@ -548,7 +549,8 @@ export function createMcpStdioServer({ name, version, instructions, tools = [] }
           }
           return { jsonrpc: '2.0', id, result };
         } catch (error) {
-          const message = error instanceof BridgeError ? error.message : 'Falló la operación local del puente.';
+          const message = error instanceof BridgeError && !containsPrivateData(error.message)
+            ? error.message : 'Falló la operación local del puente.';
           return {
             jsonrpc: '2.0',
             id,

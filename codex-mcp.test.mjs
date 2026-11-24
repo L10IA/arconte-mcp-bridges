@@ -634,6 +634,7 @@ test('Codex conserva el cerrojo tras un timeout sin terminación confirmada aunq
   const retry = await write();
   assert.equal(retry.result.isError, true);
   assert.match(retry.result.content[0].text, /escritor previo.*terminación del árbol.*limpieza manual/i);
+  assert.ok(!retry.result.content[0].text.includes(lockDir), 'el mensaje no debe revelar el directorio privado de cerrojos');
   assert.equal(readFileSync(path, 'utf8'), stale);
   assert.equal(writes, 2);
 });
