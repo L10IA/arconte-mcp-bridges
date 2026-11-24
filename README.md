@@ -1,6 +1,6 @@
 # ARCONTE MCP Bridges
 
-Tres servidores MCP locales conectan Antigravity Desktop con Codex y Claude Code mediante sus CLI oficiales. Usan entrada y salida estándar y los módulos nativos de Node.js. Instala Node.js 24.14 o posterior y clona este repositorio. La delegación también requiere la CLI de destino instalada y autenticada.
+Tres servidores MCP locales conectan Antigravity Desktop con Codex y Claude Code mediante sus CLI oficiales. Usan entrada y salida estándar y los módulos nativos de Node.js. Instala Node.js 24.14 o posterior y clona el repositorio o extrae el ZIP completo de la distribución. La delegación también requiere la CLI de destino instalada y autenticada. Si el comando habitual es un enlace o un archivo por lotes, puedes señalar el ejecutable real de confianza mediante `CODEX_BIN`, `CLAUDE_BIN` o `AGY_BIN`.
 
 | Servidor | Cliente habitual | Destino |
 | --- | --- | --- |
@@ -8,7 +8,7 @@ Tres servidores MCP locales conectan Antigravity Desktop con Codex y Claude Code
 | `claude-code-local` | Antigravity | Claude Code CLI |
 | `antigravity-local` | Claude Code o Codex | Antigravity CLI y buzón opcional |
 
-Sustituye `<PUENTES>` por la carpeta de este repositorio y `<PROYECTO>` por una carpeta absoluta, existente y local que quieras compartir. Los ejemplos JSON sirven para clientes con configuración `mcpServers`, como Antigravity. Cada ejemplo es una configuración completa independiente. Si el cliente ya tiene servidores, añade solo las entradas que necesites.
+Sustituye `<PUENTES>` por la carpeta que contiene los cinco módulos `.mjs` del puente y `<PROYECTO>` por una carpeta absoluta, existente y local que quieras compartir. Los ejemplos JSON sirven para clientes con configuración `mcpServers`, como Antigravity. Cada ejemplo es una configuración completa independiente. Si el cliente ya tiene servidores, añade solo las entradas que necesites.
 
 ## 1. Comprobar la conexión
 
@@ -67,7 +67,7 @@ Codex y Claude Code aceptan los mismos argumentos de arranque tras el archivo de
 
 ## Migrar desde la configuración anterior
 
-Un registro con solo `--allow-project-data` ahora **falla en el arranque**. En los argumentos de arranque, sustituye la antigua opción aislada por `--allow-project-data --project-root "<PROYECTO>" --access read-only` como argumentos separados. Para volver a la comprobación básica, deja únicamente el archivo. Las opciones desconocidas, repetidas, incompletas o incompatibles detienen el servidor. Recarga la conexión MCP en el cliente. Las sesiones anteriores sin procedencia verificable y los mensajes del antiguo buzón global quedan fuera del nuevo ámbito. Inicia una sesión nueva en la raíz elegida. Para migrar una instancia con escritura, termina todos los escritores de la versión anterior y revisa sus cerrojos pendientes antes de activar la nueva rama. Todas las instancias que escriben sobre el mismo proyecto deben usar la misma raíz y el mismo almacén privado.
+Un registro con solo `--allow-project-data` ahora **falla en el arranque**. En los argumentos de arranque, sustituye la antigua opción aislada por `--allow-project-data --project-root "<PROYECTO>" --access read-only` como argumentos separados. Para volver a la comprobación básica, deja únicamente el archivo. Las opciones desconocidas, repetidas, incompletas o incompatibles detienen el servidor. Recarga la conexión MCP en el cliente. Las sesiones anteriores sin procedencia verificable y los mensajes del antiguo buzón global quedan fuera del nuevo ámbito. Inicia una sesión nueva en la raíz elegida. Para migrar una instancia con escritura, termina todos los escritores de la versión anterior y revisa sus cerrojos pendientes antes de activar la versión 1.0. Todas las instancias que escriben sobre el mismo proyecto deben usar la misma raíz y el mismo almacén privado.
 
 ## Qué llega al proveedor
 

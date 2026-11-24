@@ -4,6 +4,7 @@ import { closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, r
 import { delimiter, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { once } from 'node:events';
 
+export const BRIDGE_VERSION = '1.0.0';
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const MAX_IN_FLIGHT = 4;
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-03-26', '2024-11-05']);
@@ -366,7 +367,7 @@ export class BridgeError extends Error {}
 export function connectionServer(name) {
   return createMcpStdioServer({
     name,
-    version: '1.0.0',
+    version: BRIDGE_VERSION,
     instructions: 'Conexión local de ARCONTE. Llama a bridge_ping sin argumentos.',
     tools: [{
       name: 'bridge_ping',

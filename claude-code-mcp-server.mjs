@@ -555,7 +555,6 @@ export function createClaudeCodeMcpServer(options = {}) {
 
   return projectServer(policy, {
     name: 'claude-code-local',
-    version: '0.1.0',
     instructions:
       'Servidor MCP local para Claude Code CLI: verifica una sesión claude.ai y retira credenciales del entorno. Los ajustes restantes del CLI pueden influir en proveedor y destino. Usa read-only por defecto y claude_list_sessions para obtener sessionId antes de --resume.',
     tools,

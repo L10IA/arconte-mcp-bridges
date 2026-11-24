@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -45,6 +46,22 @@ function doubles(policy, id = idA) {
   });
   return { agy, claude, codex, calls };
 }
+
+test('los tres servidores anuncian la versión distribuida en los dos modos de arranque', t => {
+  const w = workspace(t);
+  const release = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8')).version;
+  const input = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n';
+  for (const provider of ['codex', 'claude-code', 'antigravity']) {
+    const script = join(here, provider + '-mcp-server.mjs');
+    for (const flags of [[], ['--allow-project-data', '--project-root', w.root]]) {
+      const child = spawnSync(process.execPath, [script, ...flags], {
+        cwd: w.base, env: testEnv(w.base), input, encoding: 'utf8', timeout: 8000, windowsHide: true,
+      });
+      assert.equal(child.status, 0, child.stderr);
+      assert.deepEqual(JSON.parse(child.stdout).result.serverInfo, { name: provider + '-local', version: release });
+    }
+  }
+});
 
 test('los tres proveedores comprueban la raíz y el permiso antes de cualquier efecto', async t => {
   const w = workspace(t), h = doubles(w.policy());
@@ -327,6 +344,23 @@ test('las peticiones saturadas a Antigravity no ejecutan el proveedor y luego pu
   io.send(rpc(20, 'antigravity_ask', { prompt: 'Reintento' }));
   assert.ok((await io.take()).result.structuredContent.ok);
   assert.equal(calls, MAX_IN_FLIGHT + 1);
+});
+
+test('dos destinatarios comparten la reserva de un mismo identificador de envío', async t => {
+  const w = workspace(t), policy = w.policy({ access: 'read-write', mailboxAs: 'codex' });
+  const server = createAntigravityMcpServer({ policy, now: () => new Date('2026-01-01T07:01:00Z') });
+  const id = '20260101-0101-codex-ejemplo';
+  const root = policy.mailboxRoot(true);
+  const reservation = join(root, '.envio-' + createHash('sha256').update(id).digest('hex'));
+  const send = para => call(server, 'buzon_send', { para, tipo: 'aviso', asunto: 'Ejemplo', cuerpo: 'Datos ficticios' });
+  mkdirSync(reservation, { mode: 0o700 });
+  for (const para of ['claude-code', 'antigravity']) denied(await send(para));
+  assert.deepEqual(readdirSync(root), [basename(reservation)]);
+  rmdirSync(reservation);
+  assert.equal((await send('claude-code')).result.structuredContent.id, id);
+  denied(await send('antigravity'));
+  assert.equal(existsSync(reservation), false);
+  assert.equal(existsSync(join(root, 'para-antigravity')), false);
 });
 
 test('archivar comprueba tamaño e identidad antes de crear la copia', async t => {

@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -283,13 +283,22 @@ function createMailbox(policy) {
         throw new BridgeError('El mensaje excede el tamaño máximo del buzón (64 KiB).');
       }
       const duplicate = 'Ya existe un mensaje con ese id. Cambia el asunto o espera un minuto.';
-      // El id debe ser único en todo el buzón: dos mensajes con el mismo id no podrían archivarse.
-      for (const other of [...Object.values(AGENT_FOLDERS), ...AGENTS.map(archiveFolder)]) {
-        const existing = folderPath(other);
-        if (existing && existsSync(join(existing, `${id}.md`))) throw new BridgeError(duplicate);
+      // Dos instancias del mismo remitente pueden publicar el mismo id en bandejas distintas.
+      const digest = createHash('sha256').update(id).digest('hex');
+      const reservation = join(policy.mailboxRoot(true), '.envio-' + digest);
+      try { mkdirSync(reservation, { mode: 0o700 }); }
+      catch (error) {
+        if (error.code === 'EEXIST') throw new BridgeError('Ya hay un envío con ese identificador. Revisa la entrega antes de repetirlo.');
+        throw error;
       }
-      const folder = folderPath(AGENT_FOLDERS[para], { create: true });
-      publishMessage(join(folder, id + '.md'), text, duplicate);
+      try {
+        for (const other of [...Object.values(AGENT_FOLDERS), ...AGENTS.map(archiveFolder)]) {
+          const existing = folderPath(other);
+          if (existing && existsSync(join(existing, `${id}.md`))) throw new BridgeError(duplicate);
+        }
+        const folder = folderPath(AGENT_FOLDERS[para], { create: true });
+        publishMessage(join(folder, id + '.md'), text, duplicate);
+      } finally { rmdirSync(reservation); }
       return { id, buzon: para, carpeta: AGENT_FOLDERS[para], bytes: Buffer.byteLength(text, 'utf8') };
     },
 
@@ -602,7 +611,6 @@ export function createAntigravityMcpServer(options = {}) {
 
   return projectServer(policy, {
     name: 'antigravity-local',
-    version: '0.1.0',
     instructions:
       'Consulta la CLI oficial de Antigravity en el proyecto autorizado. Usa plan por defecto.' +
       (policy.mailboxAs ? ' Puedes consultar tu bandeja y tu archivo.' : '') + mailboxHint,

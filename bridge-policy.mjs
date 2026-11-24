@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
-import { assertPlainCwd, BridgeError, connectionServer, createMcpStdioServer } from './mcp-stdio.mjs';
+import { assertPlainCwd, BRIDGE_VERSION, BridgeError, connectionServer, createMcpStdioServer } from './mcp-stdio.mjs';
 
 const identities = ['codex', 'claude-code', 'antigravity'];
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -174,7 +174,7 @@ export function startBridge(name, factory, flags = process.argv.slice(2)) {
   }
 }
 
-export function projectServer(policy, { name, version, instructions, tools }) {
+export function projectServer(policy, { name, version = BRIDGE_VERSION, instructions, tools }) {
   const provider = name.replace(/-local$/, '');
   const visible = tools.filter(tool => !tool.name.startsWith('buzon_') || policy.mailboxAs);
   return createMcpStdioServer({ name, version, instructions, tools: visible.map(tool => {

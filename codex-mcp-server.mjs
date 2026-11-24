@@ -5,6 +5,7 @@ import { isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   appendBoundedOutput,
+  BRIDGE_VERSION,
   assertNativeExecutable,
   assertPlainCwd,
   connectionServer,
@@ -17,7 +18,6 @@ import {
 import { projectServer, startBridge } from './bridge-policy.mjs';
 
 const SERVER_NAME = 'codex-local';
-const SERVER_VERSION = '0.1.15';
 const ALLOWED_SANDBOXES = new Set(['read-only', 'workspace-write']);
 const DEFAULT_TIMEOUT_SEC = 240;
 const MAX_TIMEOUT_SEC = 600;
@@ -332,7 +332,7 @@ export async function defaultProbeAppServer(executable, env, cwd, { spawnProcess
 
     (async () => {
       await request('initialize', {
-        clientInfo: { name: 'arconte-mcp', title: 'ARCONTE MCP', version: SERVER_VERSION },
+        clientInfo: { name: 'arconte-mcp', title: 'ARCONTE MCP', version: BRIDGE_VERSION },
         capabilities: { experimentalApi: true },
       });
       send({ method: 'initialized' });
@@ -902,7 +902,7 @@ export function createCodexMcpServer(options = {}) {
 
   return projectServer(policy, {
     name: SERVER_NAME,
-    version: options.version ?? SERVER_VERSION,
+    version: options.version,
     instructions:
       'Puente MCP local hacia Codex CLI: verifica una cuenta ChatGPT y retira credenciales del entorno. Otros ajustes del CLI pueden influir en proveedor y destino; no modifica ~/.codex/config.toml.',
     tools,
